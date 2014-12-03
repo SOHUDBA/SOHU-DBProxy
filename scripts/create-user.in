@@ -1,0 +1,295 @@
+#!/bin/sh
+#
+# chkconfig: - 86 14
+# description: sohu dbproxy create user
+# processname: create-user
+#
+
+# Source function library.
+. /etc/rc.d/init.d/functions
+
+##### major functional modules
+
+die() { echo "$@" >&2; exit 1; }
+
+usage()
+{
+  cat <<EOF
+Usage: $PROGNAME OPTIONS...
+
+OPTIONS:
+--help | -h                                                      Display this help and exit.
+--user=name@ip | -u                                              User to create if not current user.
+                                                                 Format: user@ip, ip should be like x.x.x.x.
+                                                                 Eg: X.% not allowed, instead X.%.%.%
+--password=pwd | -p                                              Password to use when create user.
+--grant="grant_option" | -g                                      Grant for user to create.
+                                                                 Format: operation(SELECT/INSERT/...) ON db.table
+                                                                 Eg: SELECT, INSERT, UPDATE, DELETE ON test.*
+--connlimit=rw_limit(NULL):ro_limit(NULL):rws_limit(NULL) | -c   Connection limit. You must specify limit of rw/ro/rws type in order. 
+                                                                 Limit should be an integer, 0 for unlimit, -1 for no connection allowed.
+                                                                 If use default limit for certain type, use NULL.
+                                                                 Eg: 0:-1:50; NULL:NULL:NULL.
+EOF
+}
+
+user_error()
+{
+  cat <<EOF
+user error: missing --user=name or bad format.
+use --help for more infomation.
+EOF
+}
+
+password_error()
+{
+  cat <<EOF
+password error: missing --password=pwd.
+use --help for more infomation.
+EOF
+}
+
+grant_error() 
+{
+  cat <<EOF
+grant error: missing --grant=grant_option.
+use --help for more infomation.
+EOF
+}
+
+ip_format_error()
+{
+  cat <<EOF
+ip format error.
+use --help for more infomation.
+EOF
+}
+
+check_ip_format() 
+{
+  # ^(1.2.3.4|%.%.%.%|1.%.%.%|1.2.%.%|1.2.3.%)$
+  echo $1 | grep -E "^((((2(([0-4][[:digit:]])|(5[0-5])))|(1([[:digit:]]{2}))|([1-9][[:digit:]])|([1-9]))(\.((2(([0-4][[:digit:]])|(5[0-5])))|(1([[:digit:]]{2}))|([1-9][[:digit:]])|([[:digit:]]))){3})|(%(\.%){3})|(((2(([0-4][[:digit:]])|(5[0-5])))|(1([[:digit:]]{2}))|([1-9][[:digit:]])|([1-9]))(\.%){3})|(((2(([0-4][[:digit:]])|(5[0-5])))|(1([[:digit:]]{2}))|([1-9][[:digit:]])|([1-9]))(\.((2(([0-4][[:digit:]])|(5[0-5])))|(1([[:digit:]]{2}))|([1-9][[:digit:]])|([[:digit:]])))(\.%){2})|(((2(([0-4][[:digit:]])|(5[0-5])))|(1([[:digit:]]{2}))|([1-9][[:digit:]])|([1-9]))(\.((2(([0-4][[:digit:]])|(5[0-5])))|(1([[:digit:]]{2}))|([1-9][[:digit:]])|([[:digit:]]))){2}\.%))$" >/dev/null
+  return $?
+}
+
+connlimit_error()
+{
+  cat <<EOF
+connlimit format error: bad format.
+use --help for infomation.
+EOF
+}
+
+# main entrance
+PROGNAME=$(basename $0)
+
+SHORT_OPTS="hu:p:g:c:"
+LONG_OPTS="
+help
+user:
+password:
+grant:
+connlimit:
+"
+if [ $# -gt 0 ]; then
+  ARGS=$(getopt -n$PROGNAME -o "$SHORT_OPTS" -l "$LONG_OPTS" -- "$@") || \
+  { echo "getopt error"; usage; exit 1; }
+  eval set -- "$ARGS"
+fi
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --help|-h) usage; exit ;;
+    --user|-u) 
+      MYSQLD_USER=$2
+      shift
+      ;;
+    --password|-p)
+      MYSQLD_PWD=$2
+      shift
+      ;;
+    --grant|-g)
+      MYSQLD_GRANT=$2
+      shift
+      ;;
+	--connlimit|-c)
+	  MYSQLD_CONN=$2
+	  shift
+	  ;;
+    --) shift
+      declare e
+      for e; do
+        eval_param "$e"
+      done
+      break ;;
+    #bad options
+    -*) echo "bad1"; usage; exit 1 ;;
+    *) echo "bad2"; usage; exit 1 ;;
+  esac
+  shift
+done
+
+# MYSQLD_USER, MYSQLD_PWD, MYSQLD_GRANT cannot be null
+if [ -z "$MYSQLD_USER" ]; then
+  user_error
+  exit 1
+fi
+if [ -z "$MYSQLD_PWD" ]; then
+  password_error
+  exit 1
+fi
+if [ -z "$MYSQLD_GRANT" ]; then
+  grant_error
+  exit 1
+fi
+
+# check user format: must be user@ip
+USER_NAME=$(echo "$MYSQLD_USER" | awk -F"@" '{print $1}')
+USER_IP=$(echo "$MYSQLD_USER" | awk -F"@" '{print $2}')
+[[ (-n "$USER_NAME") && (-n "$USER_IP") ]] || { user_error; exit 1; }
+# check ip format: must be x.x.x.x
+check_ip_format $USER_IP
+if [ $? == "1" ]; then
+  ip_format_error
+  exit 1
+fi
+
+# check limit format: must be rw_limit(NULL):ro_limit(NULL):rws_limit(NULL)
+if [ -n "$MYSQLD_CONN" ]; then
+  RW_LIMIT=$(echo "$MYSQLD_CONN" | awk -F":" '{print $1}')
+  RO_LIMIT=$(echo "$MYSQLD_CONN" | awk -F":" '{print $2}')
+  RWS_LIMIT=$(echo "$MYSQLD_CONN" | awk -F":" '{print $3}')
+  [[ (-n "$RW_LIMIT") && (-n "$RO_LIMIT") && (-n "$RWS_LIMIT") ]] || { connlimit_error; exit 1; }
+  [[ ("$RW_LIMIT" -gt 0) || ("$RW_LIMIT" -eq -1) || ("$RW_LIMIT" == "NULL") ]] || { connlimit_error; exit 1; }
+  [[ ("$RO_LIMIT" -gt 0) || ("$RO_LIMIT" -eq -1) || ("$RO_LIMIT" == "NULL") ]] || { connlimit_error; exit 1; }
+  [[ ("$RWS_LIMIT" -gt 0) || ("$RWS_LIMIT" -eq -1) || ("$RWS_LIMIT" == "NULL") ]] || { connlimit_error; exit 1; }
+fi
+
+# set MP_HOME, MP_CNF
+MP_HOME=$(dirname $0)
+MP_HOME=$(cd "$MP_HOME"/../; pwd)
+[ -d "$MP_HOME" ] || die "Error reading directory: $MP_HOME"
+[ -z "$MP_CNF" ] && MP_CNF=$MP_HOME/etc/mysql-proxy.cnf
+[ -r "$MP_CNF" ] || die "Error reading configuration: $MP_CNF"
+[ -z "$MP_XML" ] && MP_XML=$MP_HOME/etc/mysql-proxy.xml
+[ -r "$MP_XML" ] || die "Error reading configuration: $MP_XML"
+
+# get admin-related infomation
+mp_admin_address=$(sed -n "/^admin-address=/s/^admin-address=//p" "$MP_CNF")
+[ -n "$mp_admin_address" ] || die "Error reading admin-address"
+mp_admin_username=$(sed -n "/^admin-username=/s/^admin-username=//p" "$MP_CNF")
+[ -n "$mp_admin_username" ] || die "Error reading admin-username"
+mp_admin_password=$(sed -n "/^admin-password=/s/^admin-password=//p" "$MP_CNF")
+[ -n "$mp_admin_password" ] || die "Error reading admin-password"
+mp_admin_host=${mp_admin_address%:*}
+[ -n "$mp_admin_host" ] || die "Error reading admin-host"
+mp_admin_port=${mp_admin_address#*:}
+[ -n "$mp_admin_port" ] || die "Error reading admin-port"
+MYSQL_ADMIN="mysql -h $mp_admin_host -P $mp_admin_port -u $mp_admin_username -p$mp_admin_password"
+$MYSQL_ADMIN -ABs -e "" || die "Error login admin. Check if dbproxy is up."
+
+# showusers;
+#+------------+---------------+----------------+----------------+----------------+----------------+
+#| user       | ip_range      | rw_login_limit | rw_login_count | ro_login_limit | ro_login_count |
+#+------------+---------------+----------------+----------------+----------------+----------------+
+#| proxy      | X.X.X.X | 0              | 0              | 0              | 0              |
+#| proxy      | %.%.%.%       | 3000           | 0              | 6000           | 0              |
+#+------------+---------------+----------------+----------------+----------------+----------------+
+
+# check if user@ip matched, warning and exit 
+EXIST_USER_IP=$($MYSQL_ADMIN -ABs -e showusers | awk '{if($1=="'$USER_NAME'" && $2=="'$USER_IP'") print "1"}')
+if [ "$EXIST_USER_IP" == "1" ]; then
+  echo "'$USER_NAME'@'$USER_IP' already exists. Please logon dbproxy to excecute command."
+  exit 1
+fi
+
+# check if password matched
+PWD_IN_XML=$(echo "cat /dbproxy/user_info/user[@name='$USER_NAME']/password/text()" | xmllint --shell "$MP_XML" | sed '/^\/ >/d')
+if [[ (-n "$PWD_IN_XML") && ("$PWD_IN_XML" != "$MYSQLD_PWD") ]]; then
+  echo "The password of the user you want to add does not identify with password in xml."
+  exit 1
+fi
+
+# showbackends;
+#+-------------+------------------+--------+------+-------------------+-----------+-----------+------+------+----------+---------------+--------+
+#| backend_ndx | address*         | status*| type*| connected_clients*| rw_weight | ro_weight | rise | fall | interval | fastdowninter | health*|
+#+-------------+------------------+--------+------+-------------------+-----------+-----------+------+------+----------+---------------+--------+
+#| 0           | X.X.X.X:4408 | up     | rw   | 0                 | 4         | 4         | 2    | 4    | 5        | 5             | 5      |
+#| 1           | X.X.X.X:4408 | up     | ro   | 0                 | 4         | 4         | 2    | 4    | 5        | 5             | 5      |
+#| 2           | X.X.X.X:4408 | down   | ro   | 0                 | 1         | 4         | 2    | 4    | 5        | 5             | 0      |
+#+-------------+------------------+--------+------+-------------------+-----------+-----------+------+------+----------+---------------+--------+
+mp_rw_backend_address=$($MYSQL_ADMIN -ABs -e showbackends|awk '{if($4=="rw") print $2}')
+mp_rw_backend_host=${mp_rw_backend_address%:*}
+mp_rw_backend_port=${mp_rw_backend_address#*:}
+
+# backend excecute grant sql, grant_sql for each backend_host
+SSH="ssh -q -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+MYSQL_RW_BACKEND="mysql -h 127.0.0.1 -P $mp_rw_backend_port -uroot"
+
+backend_array=( $($MYSQL_ADMIN -ABs -e showbackends|awk '{print $2}') )
+echo "========================================"
+for backend in ${backend_array[@]}; do
+  backend_host=${backend%:*}
+  GRANT_SQL="GRANT $MYSQLD_GRANT TO '$USER_NAME'@'$backend_host' IDENTIFIED BY '$MYSQLD_PWD'"
+  GRANT_SQL_RESULT=$($SSH root@$mp_rw_backend_host "$MYSQL_RW_BACKEND -ABs -e \"$GRANT_SQL\"" 2>&1)
+  if [ x"$GRANT_SQL_RESULT" == x"" ]; then
+    echo "Create user on backend succeed. Sql is: $GRANT_SQL."
+  else
+    echo "Create user on backend failed. Sql is: $GRANT_SQL. Error is: $GRANT_SQL_RESULT"
+    echo "========================================"
+    exit 1
+  fi
+done
+
+
+# proxy adduser
+ADDUSER_SQL="adduser --username=$USER_NAME --passwd='$MYSQLD_PWD' --hostip=$USER_IP;"
+ADDUSER_SQL_RESULT=$($MYSQL_ADMIN -ABs -e "$ADDUSER_SQL" 2>&1)
+
+if [ x"$ADDUSER_SQL_RESULT" == x"" ]; then
+  echo "Create user on proxy succeed. Admin command is: $ADDUSER_SQL."
+else
+  echo "Create user on proxy failed. Admin command is: $ADDUSER_SQL. Error is: $ADDUSER_SQL_RESULT"
+  echo "========================================"
+  exit 1
+fi
+
+# proxy setconnlimit
+if [ -n "$MYSQLD_CONN" ]; then
+  if [ "$RW_LIMIT" != "NULL" ]; then
+    SETCONNLIMIT_SQL1="setconnlimit --username=$USER_NAME --hostip=$USER_IP --port-type=rw --conn-limit=$RW_LIMIT;"
+	SETCONNLIMIT_SQL_RESULT1=$($MYSQL_ADMIN -ABs -e "$SETCONNLIMIT_SQL1" 2>&1)
+	if [ x"$SETCONNLIMIT_SQL_RESULT1" == x"" ]; then
+      echo "SetConnlimit for rw on proxy succeed. Admin command is: $SETCONNLIMIT_SQL1."
+    else
+      echo "SetConnlimit for rw on proxy failed. Admin command is: $SETCONNLIMIT_SQL1. Error is: $SETCONNLIMIT_SQL_RESULT1"
+      echo "========================================"
+      exit 1
+	fi
+  fi
+  if [ "$RO_LIMIT" != "NULL" ]; then
+    SETCONNLIMIT_SQL2="setconnlimit --username=$USER_NAME --hostip=$USER_IP --port-type=ro --conn-limit=$RO_LIMIT;"
+	SETCONNLIMIT_SQL_RESULT2=$($MYSQL_ADMIN -ABs -e "$SETCONNLIMIT_SQL2" 2>&1)
+	if [ x"$SETCONNLIMIT_SQL_RESULT2" == x"" ]; then
+      echo "SetConnlimit for ro on proxy succeed. Admin command is: $SETCONNLIMIT_SQL2."
+    else
+      echo "SetConnlimit for ro on proxy failed. Admin command is: $SETCONNLIMIT_SQL2. Error is: $SETCONNLIMIT_SQL_RESULT2"
+      echo "========================================"
+      exit 1
+	fi
+  fi
+  if [ "$RWS_LIMIT" != "NULL" ]; then
+    SETCONNLIMIT_SQL3="setconnlimit --username=$USER_NAME --hostip=$USER_IP --port-type=rws --conn-limit=$RWS_LIMIT;"
+	SETCONNLIMIT_SQL_RESULT3=$($MYSQL_ADMIN -ABs -e "$SETCONNLIMIT_SQL3" 2>&1)
+	if [ x"$SETCONNLIMIT_SQL_RESULT3" == x"" ]; then
+      echo "SetConnlimit for rws on proxy succeed. Admin command is: $SETCONNLIMIT_SQL3."
+    else
+      echo "SetConnlimit for rws on proxy failed. Admin command is: $SETCONNLIMIT_SQL3. Error is: $SETCONNLIMIT_SQL_RESULT3"
+      echo "========================================"
+      exit 1
+	fi
+  fi
+fi
+
+echo "========================================"
+
+#eof

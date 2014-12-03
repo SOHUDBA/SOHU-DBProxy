@@ -1,0 +1,16 @@
+[mysql-proxy]
+ro-address=0.0.0.0:4455
+rw-address=0.0.0.0:4456
+admin-address=127.0.0.1:4457
+plugin-dir=lib/dbproxy/plugins/
+config-xml=etc/mysql-proxy.xml
+plugins=proxy,admin
+admin-username=adtest
+admin-password=adtest
+pid-file=var/log/mysql-proxy.pid
+log-file=var/log/mysql-proxy.log
+log-level=debug
+keepalive=false
+daemon=true
+event-threads=2
+dbproxy-collation=latin1_swedish_ci

@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<dbproxy version="1.0">
+  <mysql_proxy>
+    <multiplex>off</multiplex>
+    <rw_addresses>127.0.0.1:3455</rw_addresses>
+    <ro_addresses>127.0.0.1:3456</ro_addresses>
+    <rw_load_balance_algorithm>wrr</rw_load_balance_algorithm>
+    <ro_load_balance_algorithm>lc</ro_load_balance_algorithm>
+  </mysql_proxy>
+  <slow-query-log>
+    <enabled>off</enabled>
+    <file>var/log/slow.log</file>
+    <execute-time>2</execute-time>
+  </slow-query-log>
+  <backends>
+    <backend address="X.X.X.X:3307" type="ro">
+      <state>up</state>
+      <rw_weight>2</rw_weight>
+      <ro_weight>2</ro_weight>
+    </backend>
+    <backend address="X.X.X.X:3333" type="ro">
+      <state>pending</state>
+      <rw_weight>2</rw_weight>
+      <ro_weight>2</ro_weight>
+    </backend>
+    <backend address="X.X.X.X:3306" type="rw">
+      <state>pending</state>
+      <rw_weight>2</rw_weight>
+      <ro_weight>2</ro_weight>
+    </backend>
+    <backend address="X.X.X.X:3306" type="ro">
+      <state>up</state>
+      <rw_weight>3</rw_weight>
+      <ro_weight>3</ro_weight>
+    </backend>
+  </backends>
+  <user_info>
+    <user name="root">
+      <password>root</password>
+      <ip_ranges>
+        <ip>X.X.X.%</ip>
+        <ip>x.x.%</ip>
+        <ip>x.x.%</ip>
+        <ip>X.X.%.%</ip>
+        <ip>X.X.%.%</ip>
+      </ip_ranges>
+    </user>
+    <user name="test">
+      <password>test</password>
+      <ip_ranges>
+        <ip>x.x.%</ip>
+        <ip>X.X.%.%</ip>
+      </ip_ranges>
+    </user>
+  </user_info>
+  <conn_limit>
+    <conn_limit_rw>
+      <default_limit>
+        <max_connections>3333</max_connections>
+      </default_limit>
+      <limits>
+        <limit username="test" ip="x.x.%">
+          <max_connections>30</max_connections>
+        </limit>
+        <limit username="root" ip="x.x.%">
+          <max_connections>50</max_connections>
+        </limit>
+        <limit username="root" ip="X.X.X.%">
+          <max_connections>50</max_connections>
+        </limit>
+        <limit username="test" ip="X.X.%.%">
+          <max_connections>30</max_connections>
+        </limit>
+        <limit username="root" ip="X.X.%.%">
+          <max_connections>50</max_connections>
+        </limit>
+      </limits>
+    </conn_limit_rw>
+    <conn_limit_ro>
+      <default_limit>
+        <max_connections>4444</max_connections>
+      </default_limit>
+      <limits>
+        <limit username="root" ip="X.X.X.%">
+          <max_connections>40</max_connections>
+        </limit>
+      </limits>
+    </conn_limit_ro>
+  </conn_limit>
+  <pool_conf>
+    <pool_conf_rw>
+      <default_pool>
+        <min_connections>50</min_connections>
+        <max_connections>200</max_connections>
+        <max_idle_interval>3600</max_idle_interval>
+      </default_pool>
+      <pools>
+        <pool username="test">
+          <min_connections>25</min_connections>
+          <max_connections>30</max_connections>
+          <max_idle_interval>1800</max_idle_interval>
+        </pool>
+      </pools>
+    </pool_conf_rw>
+    <pool_conf_ro>
+      <default_pool>
+        <min_connections>50</min_connections>
+        <max_connections>200</max_connections>
+        <max_idle_interval>3600</max_idle_interval>
+      </default_pool>
+      <pools>
+        <pool username="test">
+          <min_connections>30</min_connections>
+          <max_connections>200</max_connections>
+          <max_idle_interval>3600</max_idle_interval>
+        </pool>
+      </pools>
+    </pool_conf_ro>
+  </pool_conf>
+  <sql_rules>
+    <sql_single>
+      <rule user="test" db="test" text="select * from a where id in (1)">
+        <action>log</action>
+        <disabled>true</disabled>
+      </rule>
+    </sql_single>
+    <sql_template/>
+  </sql_rules>
+</dbproxy>

@@ -1,0 +1,2 @@
+SUBDIRS=t r
+

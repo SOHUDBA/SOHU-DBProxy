@@ -1,0 +1,230 @@
+#!/bin/sh
+#
+# chkconfig: - 86 14
+# description: sohu dbproxy daemon
+# processname: mysql-proxyd
+# config: /etc/mysql-proxy/mysql_proxyd.conf
+#
+
+# Source function library.
+. /etc/rc.d/init.d/functions
+
+scriptdir=`dirname $0`
+scriptname=`basename $0`
+scriptdir=`(cd "$scriptdir/"; pwd)`
+scriptdir=`dirname $scriptdir`
+
+MYSQL_PROXY_HOME=$scriptdir
+LOCAL_HOSTIP=$(getent hosts $(hostname) | awk '{print $1}' | head -n 1)
+
+za_init()
+{
+    if ! id zabbix >/dev/null 2>&1; then
+        groupadd zabbix >/dev/null 2>&1
+	    useradd -g zabbix zabbix >/dev/null 2>&1
+    fi
+
+    ZA_CNF=$MYSQL_PROXY_HOME/etc/zabbix_agentd.cnf
+    #sed "s#\$MYSQL_PROXY_HOME#$MYSQL_PROXY_HOME#g" ${ZA_CNF}.sample >${ZA_CNF}
+    if [ -f $ZA_CNF ]; then
+      chown zabbix:zabbix $ZA_CNF
+    fi
+
+    PXC_CHECK=$MYSQL_PROXY_HOME/bin/pxc_check_status
+    if [ -f $PXC_CHECK ]; then
+      chown zabbix:zabbix $PXC_CHECK
+      chmod +x $PXC_CHECK
+    fi
+
+    MYSQL_CHECK=$MYSQL_PROXY_HOME/bin/mysql_check_status
+    if [ -f $MYSQL_CHECK ]; then
+      chown zabbix:zabbix $MYSQL_CHECK
+      chmod +x $MYSQL_CHECK
+    fi
+
+    chown -R zabbix:zabbix $MYSQL_PROXY_HOME/var
+}
+mp_init()
+{
+    MP_CNF=$MYSQL_PROXY_HOME/etc/mysql-proxy.cnf
+    #sed "s#\$MYSQL_PROXY_HOME#$MYSQL_PROXY_HOME#g" ${MP_CNF}.sample >${MP_CNF}
+    if [ -f $MP_CNF ]; then
+      chmod 0660 ${MP_CNF}
+    fi
+
+    MP_XML=$MYSQL_PROXY_HOME/etc/mysql-proxy.xml
+    #sed "s#\$MYSQL_PROXY_HOME#$MYSQL_PROXY_HOME#g;s#\${LOCAL_HOSTIP}#${LOCAL_HOSTIP}#g" ${MP_XML}.sample >${MP_XML}
+    if [ -f $MP_XML ]; then
+      chmod 0660 ${MP_XML}
+    fi
+}
+
+add_path()
+{
+  declare _new=$1
+  declare _target=$2
+  declare _addto=$3
+  if [ -z "$_new" -o -z "$_target" -o -z "$_addto" ]; then
+    return 1
+  fi
+  if [[ ":${!_target}:" != *":${_new}:"* ]]; then
+    if [ -n "${!_target}" ]; then
+      if [ "$_addto" = "append" ]; then
+        eval ${_target}="${!_target}:${_new}"
+      elif [ "$_addto" = "preend" ]; then
+        eval ${_target}="${_new}:${!_target}"
+      fi
+    else
+      eval ${_target}="${_new}"
+    fi 
+  fi
+}
+append_path()
+{
+  add_path "$1" "$2" append
+}
+prepend_path()
+{
+  add_path "$1" "$2" prepend
+}
+
+setenv_lua()
+{
+    if [ `uname -s` = SunOS ]; then
+        unset LD_LIBRARY_PATH_64
+    fi
+    prepend_path "$scriptdir/lib/@PACKAGE_NAME@/lua/?.lua" LUA_PATH
+    prepend_path "$scriptdir/lib/@PACKAGE_NAME@/lua/?.so" LUA_CPATH
+    append_path "$scriptdir/lib" "@DYNLIB_PATH_VAR@"
+    append_path "$scriptdir/lib/@PACKAGE_NAME@/lua" "@DYNLIB_PATH_VAR@"
+    append_path "$scriptdir/lib/lua" "@DYNLIB_PATH_VAR@"
+    append_path "$scriptdir/lib/libevent" "@DYNLIB_PATH_VAR@"
+    append_path "$scriptdir/lib/glib" "@DYNLIB_PATH_VAR@"
+    append_path "$scriptdir/lib/mysql" "@DYNLIB_PATH_VAR@"
+    export @DYNLIB_PATH_VAR@ LUA_PATH LUA_CPATH
+}
+
+setenv()
+{
+  setenv_lua
+  cat <<EOF
+LUA_PATH=$LUA_PATH
+LUA_CPATH=$LUA_CPATH
+@DYNLIB_PATH_VAR@=$@DYNLIB_PATH_VAR@
+export @DYNLIB_PATH_VAR@ LUA_PATH LUA_CPATH
+EOF
+}
+
+prog_ctl()
+{
+    declare _prog=$2
+    declare _exec=$MYSQL_PROXY_HOME/bin/$_prog
+    declare _lock=$MYSQL_PROXY_HOME/var/lock/subsys/${_prog}.lock
+    declare _pid=$MYSQL_PROXY_HOME/var/log/${_prog}.pid
+    declare _cnf=$MYSQL_PROXY_HOME/etc/${_prog}.cnf
+    case $1 in
+    start)
+        echo -n $"Starting $_prog: "
+        if [ "$_prog" == "mysql-proxy" ]; then
+            setenv_lua
+            daemon $_exec --defaults-file=$_cnf
+        elif [ "$_prog" == "zabbix_agentd" ]; then
+            daemon $_exec -c $_cnf
+	    fi
+        rv=$?
+        echo
+        [ $rv -eq 0 ] && touch $_lock
+        return $rv
+        ;;
+    stop)
+        echo -n $"Shutting down $_prog: "
+	    killproc -p $_pid $_prog
+        rv=$?
+        echo
+        [ $rv -eq 0 ] && rm -f $_lock
+        return $rv
+        ;;
+    forcestop)
+        echo -n $"Destroying $_prog: "
+        #lsof -F p "$_exec" | sed  's/^p//' | xargs -r kill
+        ps -e -o pid,args | awk "\$2==\"$_exec\"{print \$1}" | xargs -r kill
+        rv=$?
+        echo
+        [ $rv -eq 0 ] && rm -f $_lock
+        return $rv
+        ;;
+    help)
+        if [ "$_prog" == "mysql-proxy" ]; then
+            setenv_lua
+            $_exec --help-all
+        elif [ "$_prog" == "zabbix_agentd" ]; then
+            true
+	    fi
+        ;;
+    status)
+        status -p $_pid -l $_lock $_prog
+        ;;
+    esac
+}
+
+start()
+{
+    prog_ctl start zabbix_agentd && \
+    prog_ctl start mysql-proxy
+}
+stop()
+{
+    prog_ctl stop zabbix_agentd && \
+    prog_ctl stop mysql-proxy
+}
+forcestop()
+{
+    prog_ctl forcestop zabbix_agentd && \
+    prog_ctl forcestop mysql-proxy
+}
+restart()
+{
+    stop
+    start
+}
+help()
+{
+    prog_ctl help zabbix_agentd && \
+    prog_ctl help mysql-proxy
+}
+status_all()
+{
+    prog_ctl status zabbix_agentd
+    prog_ctl status mysql-proxy
+}
+
+case "$1" in
+    start|stop|restart|help|forcestop)
+        $1
+        ;;
+    force-reload)
+        restart
+        ;;
+    status)
+        status_all
+        ;;
+    try-restart|condrestart)
+        if status_all >/dev/null ; then
+            restart
+        fi
+        ;;
+    reload)
+        action $"Service ${0##*/} does not support the reload action: " /bin/false
+        exit 3
+        ;;
+    init)
+        za_init
+        mp_init
+        ;;
+    setenv) setenv ;;
+    *)
+	    echo $"Usage: $0 {start|stop|status|restart|try-restart|force-reload|init|forcestop|setenv}"
+	    exit 2
+	    ;;
+esac
+#eof
