@@ -574,7 +574,7 @@ int network_mysqld_proto_get_com_query_result(network_packet *packet, network_my
 				if (!err) {
 					/**
 					 * @author sohu-inc.com
-					 * 因为com_query的结果集跟踪比较复杂，这里我们将事物性的处理直接卸载了判断结果集是否返回结束的函数中进行
+					 * 因为com_query的结果集跟踪比较复杂，这里我们将事务性的处理直接卸载了判断结果集是否返回结束的函数中进行
 					 */
 					// added by sohu-inc.com, 遇到eof数据包时需要重新设置事务标志字段
 					if(ok_packet->server_status & SERVER_STATUS_IN_TRANS) {
