@@ -222,21 +222,21 @@
         * 配置文件同步
         * (keepalived)
 
-脚本实现时，包括三个动作
-> to_master: notify_master "/etc/keepalived/dbproxy_notify.sh --state=master --vip=192.168.1.2 --gw=192.168.1.200"
-> 
-> 确认虚ip可用，启动并确认dbproxy正常运行
-> 
-> 
-> to_slave : notify_backup "/etc/keepalived/dbproxy_notify.sh --state=backup --vip=192.168.1.2 --gw=192.168.1.200"
-> 
-> 不做任何动作
-> 
-> 
-> to_fault : notify_fault "/etc/keepalived/dbproxy_notify.sh --state=fault --vip=192.168.1.2 --gw=192.168.1.200"
-> 
-> stop dbproxy, 并确认删除虚ip
-> 
+    脚本实现时，包括三个动作
+    > to_master: notify_master "/etc/keepalived/dbproxy_notify.sh --state=master --vip=192.168.1.2 --gw=192.168.1.200"
+    > 
+    > 确认虚ip可用，启动并确认dbproxy正常运行
+    > 
+    > 
+    > to_slave : notify_backup "/etc/keepalived/dbproxy_notify.sh --state=backup --vip=192.168.1.2 --gw=192.168.1.200"
+    > 
+    > 不做任何动作
+    > 
+    > 
+    > to_fault : notify_fault "/etc/keepalived/dbproxy_notify.sh --state=fault --vip=192.168.1.2 --gw=192.168.1.200"
+    > 
+    > stop dbproxy, 并确认删除虚ip
+    > 
 
 
 2. rw backend高可用
