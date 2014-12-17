@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<dbproxy version="1.0">
+  <mysql_proxy>
+    <multiplex>off</multiplex>
+    <sql_statistics_switch>on</sql_statistics_switch>
+    <sql_statistics_base>2</sql_statistics_base>
+    <rw_load_balance_algorithm>wrr</rw_load_balance_algorithm>
+    <ro_load_balance_algorithm>wrr</ro_load_balance_algorithm>
+    <rw_addresses>[RW_VIP]:3306</rw_addresses>
+    <ro_addresses>[RO_VIP]:3306</ro_addresses>
+    <table_engine_replace>on</table_engine_replace>
+    <black_list_flag>on</black_list_flag>
+    <dml_alter>on</dml_alter>
+    <dml_create>on</dml_create>
+    <dml_delete>on</dml_delete>
+    <dml_drop>off</dml_drop>
+    <dml_insert>on</dml_insert>
+    <dml_replace>on</dml_replace>
+    <dml_rename>on</dml_rename>
+    <dml_truncate>off</dml_truncate>
+    <dml_update>on</dml_update>
+  </mysql_proxy>
+  <backends>
+    <default>
+      <rw_weight>2</rw_weight>
+      <ro_weight>2</ro_weight>
+      <rise>1</rise>
+      <fall>3</fall>
+      <inter>10</inter>
+      <fastdowninter>10</fastdowninter>
+    </default>
+    <backend address="[MASTER_IP]:3307" type="rw">
+      <state>unknown</state>
+      <rw_weight>2</rw_weight>
+      <ro_weight>2</ro_weight>
+    </backend>
+    <backend address="[SLAVE_IP]:3307" type="ro">
+      <state>unknown</state>
+      <rw_weight>0</rw_weight>
+      <ro_weight>2</ro_weight>
+    </backend>
+  </backends>
+  <user_info>
+    <user name="mymonitor">
+      <password>secret</password>
+      <ip_ranges>
+        <ip>10.11.12.13</ip>
+      </ip_ranges>
+    </user>
+  </user_info>
+  <conn_limit>
+    <conn_limit_rw>
+      <default_limit>
+        <max_connections>20</max_connections>
+      </default_limit>
+      <limits>
+        <limit username="mymonitor" ip="10.11.12.13">
+          <max_connections>10</max_connections>
+        </limit>
+      </limits>
+    </conn_limit_rw>
+    <conn_limit_ro>
+      <default_limit>
+        <max_connections>20</max_connections>
+      </default_limit>
+      <limits>
+        <limit username="mymonitor" ip="10.11.12.13">
+          <max_connections>10</max_connections>
+        </limit>
+      </limits>
+    </conn_limit_ro>
+  </conn_limit>
+  <pool_conf>
+    <pool_conf_rw>
+      <default_pool>
+        <min_connections>0</min_connections>
+        <max_connections>20</max_connections>
+        <max_idle_interval>1800</max_idle_interval>
+      </default_pool>
+      <pools>
+        <pool username="mymonitor">
+          <min_connections>0</min_connections>
+          <max_connections>10</max_connections>
+          <max_idle_interval>180</max_idle_interval>
+        </pool>
+      </pools>
+    </pool_conf_rw>
+    <pool_conf_ro>
+      <default_pool>
+        <min_connections>0</min_connections>
+        <max_connections>20</max_connections>
+        <max_idle_interval>900</max_idle_interval>
+      </default_pool>
+      <pools>
+        <pool username="mymonitor">
+          <min_connections>0</min_connections>
+          <max_connections>10</max_connections>
+          <max_idle_interval>180</max_idle_interval>
+        </pool>
+      </pools>
+    </pool_conf_ro>
+  </pool_conf>
+  <sql_rules>
+    <sql_single/>
+    <sql_template/>
+  </sql_rules>
+</dbproxy>

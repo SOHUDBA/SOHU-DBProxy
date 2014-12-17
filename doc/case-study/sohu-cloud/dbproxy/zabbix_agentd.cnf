@@ -1,0 +1,14 @@
+## You might have to substitute the actual PATH in paramters below.
+PidFile=/opt/sohu/dbproxy/var/log/zabbix_agentd.pid
+LogFile=/opt/sohu/dbproxy/var/log/zabbix_agentd.log
+UserParameter=pxc.checkStatus[*],/opt/sohu/dbproxy/bin/mysql_check_status $1 $2 $3 $4 --timeout=10 --maxlag=60
+##########
+## CAUTION: Following parameters should NOT be modified.
+#DebugLevel=4
+Server=127.0.0.1
+ListenPort=10050
+ListenIP=127.0.0.1
+StartAgents=10
+Timeout=10
+UnsafeUserParameters=1
+## eof
