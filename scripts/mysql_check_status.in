@@ -1,0 +1,117 @@
+#!/bin/bash
+#
+# Script to make a proxy (ie HAProxy) capable of monitoring Percona XtraDB Cluster nodes properly
+#
+# Authors:
+# Raghavendra Prabhu <raghavendra.prabhu@percona.com>
+# Olaf van Zandwijk <olaf.vanzandwijk@nedap.com>
+#
+# Based on the original script from Unai Rodriguez and Olaf (https://github.com/olafz/percona-clustercheck)
+#
+# Grant privileges required:
+# GRANT PROCESS ON *.* TO 'clustercheckuser'@'localhost' IDENTIFIED BY 'clustercheckpassword!';
+
+if [[ $1 == '-h' || $1 == '--help' ]];then
+    echo "Usage: $0 <host> <port> <user> <pass> --timeout=<timeout> --maxlag=<max_lag> --loglevel=<1 error | 2 info | 3 debug >"
+    exit
+fi
+
+#LOGDIR=/opt/sohu/@PACKAGE_NAME@/var/log
+LOGDIR=$(dirname $0)/../var/log
+[ ! -d "$LOGDIR" ] && mkdir -p $LOGDIR
+today=$(date '+%Y%m%d')
+LOGFILE=$LOGDIR/dbproxy_mysql_status.$today.log
+logger()
+{
+  declare lvl=$1
+  shift
+  if (( LOGLEVEL >= lvl )); then
+    declare s
+    while IFS='' read -r s; do
+      echo "$(date '+%Y-%m-%dT%H:%M:%S.%N') mysqlcheck:$$ $lvl $s" >>$LOGFILE
+    done <<<"$@"
+  fi
+}
+logger_error() { logger 1 "$@"; }
+logger_info() { logger 2 "$@"; }
+logger_debug() { logger 3 "$@"; }
+die()
+{
+  declare c=$1
+  shift
+  declare m="errno=$c;status=Finished;errmsg=$@"
+  if ((c==0)); then
+    logger_info "args: $mysql_info"
+    logger_info "$m"
+  else
+    logger_error "args: $mysql_info"
+    logger_error "$m"
+  fi
+  logger_debug "MYSQL_STATUS:"
+  logger_debug "$MYSQL_STATUS"
+  echo "$m"
+  exit $c
+}
+
+MYSQL_HOST="$1"
+MYSQL_PORT="$2"
+MYSQL_USERNAME="$3"
+MYSQL_PASSWORD="$4"
+shift 4
+for arg; do
+  case "$arg" in
+  --timeout=*) TIMEOUT=${arg#"--timeout="} ;;
+  --maxlag=*) MAXLAG=${arg#"--maxlag="} ;;
+  --loglevel=*) LOGLEVEL=${arg#"--loglevel="} ;;
+  esac
+done
+#Timeout exists for instances where mysqld may be hung
+TIMEOUT=${TIMEOUT:-10}
+MAXLAG=${MAXLAG:-600}
+LOGLEVEL=${LOGLEVEL:-2}
+
+mysql_info="$MYSQL_HOST $MYSQL_PORT $MYSQL_USERNAME *** --timeout=$TIMEOUT --maxlag=$MAXLAG --loglevel=$LOGLEVEL"
+logger_debug "slave check begin: $mysql_info"
+declare -i rc=0
+#
+# Perform the query to check the wsrep_local_state
+#
+MYSQL_STATUS=$(mysql -nABs --connect-timeout=$TIMEOUT \
+  --host=${MYSQL_HOST} --port=${MYSQL_PORT} --user=${MYSQL_USERNAME} --password=${MYSQL_PASSWORD} \
+  -e "SHOW SLAVE STATUS\G" 2>&1)
+rc=$?
+if ((rc != 0)); then
+  die 4 "mysql_connect_error: $rc"
+fi
+slave_io_running=$( awk '/ Slave_IO_Running: /{print $2}' <<<"$MYSQL_STATUS" )
+slave_sql_running=$( awk '/ Slave_SQL_Running: /{print $2}' <<<"$MYSQL_STATUS" )
+seconds_behind_master=$( awk '/ Seconds_Behind_Master: /{print $2}' <<<"$MYSQL_STATUS" )
+last_io_errno=$( awk '/ Last_IO_Errno: /{print $2}' <<<"$MYSQL_STATUS" )
+last_sql_errno=$( awk '/ Last_SQL_Errno: /{print $2}' <<<"$MYSQL_STATUS" )
+master_log_file=$( awk '/ Master_Log_File: /{print $2}' <<<"$MYSQL_STATUS" )
+read_master_log_pos=$( awk '/ Read_Master_Log_Pos: /{print $2}' <<<"$MYSQL_STATUS" )
+relay_master_log_file=$( awk '/ Relay_Master_Log_File: /{print $2}' <<<"$MYSQL_STATUS" )
+exec_master_log_pos=$( awk '/ Exec_Master_Log_Pos: /{print $2}' <<<"$MYSQL_STATUS" )
+#logger_debug "last_io_errno=$last_io_errno last_sql_errno=$last_sql_errno master_log_file=$master_log_file \
+#read_master_log_pos=$read_master_log_pos relay_master_log_file=$relay_master_log_file \
+#exec_master_log_pos=$exec_master_log_pos"
+
+if [[ "${slave_io_running}" == "Yes" && "$slave_sql_running" == "Yes" ]]; then
+  if [[ -z "$seconds_behind_master" || "$seconds_behind_master" == "NULL" ]]; then
+    die 2 "lag_is_null: ${slave_io_running} $slave_sql_running $seconds_behind_master"
+  elif (( seconds_behind_master > MAXLAG )); then
+    die 3 "lag_too_big: ${slave_io_running} $slave_sql_running $seconds_behind_master $MAXLAG"
+  fi
+elif [[ "${slave_io_running}" != "Yes" && "$slave_sql_running" == "Yes" \
+  && "$seconds_behind_master" == "NULL" \
+  && "$master_log_file" == "$relay_master_log_file" && "$read_master_log_pos" == "$exec_master_log_pos" \
+  && "$last_io_errno" == "2003" && "$last_sql_errno" == "0" ]]; then
+  die 0 "master_disconnect: ${slave_io_running} $slave_sql_running $seconds_behind_master $last_io_errno"
+else
+  die 1 "slave not running: ${slave_io_running} $slave_sql_running $seconds_behind_master"
+fi
+
+die 0 "ok: ${slave_io_running} $slave_sql_running $seconds_behind_master"
+
+#eof
+

@@ -1,0 +1,77 @@
+export WORK_DIR=/DATA/work/dbproxy/trunk
+
+export LANG=C
+export GLIB_INSTALL_PATH=/DATA/app/glib-2.34.3
+export LIBEVENT_INSTALL_PATH=/DATA/app/libevent-2.0.21-stable
+#export LUA_INSTALL_PATH=/DATA/app/lua-5.1.5
+export OPENSSL_INSTALL_PATH=/usr
+export LIBXML2_INSTALL_PATH=/usr
+
+export PKG_CONFIG_PATH="${GLIB_INSTALL_PATH}/lib/pkgconfig"
+export PKG_CONFIG_LIBDIR="${GLIB_INSTALL_PATH}/lib"
+export GLIB_CFLAGS="-I${GLIB_INSTALL_PATH}/include/glib-2.0 -I${GLIB_INSTALL_PATH}/lib/glib-2.0/include"
+export GLIB_LIBS="-L${GLIB_INSTALL_PATH}/lib -lglib-2.0"
+export GMODULE_CFLAGS="$GLIB_CFLAGS"
+export GMODULE_LIBS="-L${GLIB_INSTALL_PATH}/lib -lgmodule-2.0"
+export GTHREAD_CFLAGS="$GLIB_CFLAGS"
+export GTHREAD_LIBS="-L${GLIB_INSTALL_PATH}/lib -lgthread-2.0"
+export CFLAGS="-I${LIBEVENT_INSTALL_PATH}/include -g -O0 -Wall -Wextra"
+export CPPFLAGS="-I${LIBEVENT_INSTALL_PATH}/include -g -O0 -Wall -Wextra"
+export LDFLAGS="-L${LIBEVENT_INSTALL_PATH}/lib -L${GLIB_INSTALL_PATH}/lib -lm -g -O0 -Wall -Wextra"
+#export LUA_CFLAGS="-I${LUA_INSTALL_PATH}/include"
+#export LUA_LIBS="-L${LUA_INSTALL_PATH}/lib -llua -ldl"
+export OPENSSL_LIBS="-L${OPENSSL_INSTALL_PATH}/lib64 -lcrypto"
+export OPENSSL_CFLAGS="-I${OPENSSL_INSTALL_PATH}/include"
+export LIBXML2_LIBS="-L${LIBXML2_INSTALL_PATH}/lib64 -lxml2"
+export LIBXML2_CFLAGS="-I${LIBXML2_INSTALL_PATH}/include/libxml2"
+
+export MYSQL_PROXY_INSTALL_PATH=/root/jxhou/soft/compile_dest
+export MYSQL_INSTALL_PATH=/usr/local/Percona-Server-5.1.68-rel14.5-513.Linux.x86_64
+
+export PATH=/DATA/app/autotools/bin:/usr/kerberos/sbin:/usr/kerberos/bin:/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+#export LD_LIBRARY_PATH=/DATA/app/lua-5.1.5/lib
+
+ulimit -c unlimited
+
+unset G_SLICE G_DEBUG
+#export G_SLICE=always-malloc
+#export G_DEBUG=gc-friendly
+
+export MYSQL_PROXY_HOME=$MYSQL_PROXY_INSTALL_PATH 
+if [ ${MYSQL_PROXY_HOME:0:1} != "/" ]; then
+  export MYSQL_PROXY_HOME=$(pwd)/${MYSQL_PROXY_HOME}
+fi
+export MYSQL_PROXY=$MYSQL_PROXY_HOME/bin/mysql-proxy
+export MYSQL_PROXY_WORKER_IP=X.X.X.X
+export MYSQL_PROXY_ADMIN_IP=X.X.X.X
+export MYSQL_PROXY_RW_PORT=3456
+export MYSQL_PROXY_RO_PORT=3455
+export MYSQL_PROXY_ADMIN_USER=adtest
+export MYSQL_PROXY_ADMIN_PASSWD=adtest
+export MYSQL_PROXY_RW_BACKEND="X.X.X.X:3401#2#UP"
+export MYSQL_PROXY_RO_BACKEND="X.X.X.X:3402#4#UP X.X.X.X:3403#1#UP"
+export MYSQL_PROXY_ADMIN_PORT=3457
+export MYSQL_PROXY_RW_LB=lc
+export MYSQL_PROXY_RO_LB=lc
+export MYSQL_PROXY_PID_FILE=$MYSQL_PROXY_HOME/mysql-proxy.pid
+export MYSQL_HOME=$MYSQL_INSTALL_PATH
+export MYSQL=$MYSQL_HOME/bin/mysql
+export MYSQL_PROXY_CONFIG_FILE=$MYSQL_PROXY_HOME/tests/mytest/mysql-proxy.xml
+
+export AUTO_START=N
+export START_TYPE=prod
+
+
+export _TEST_SUITES="account_auth user_conn_limit conn_multiplex conn_context bk_async_con rw_ro_service load_balance stress bug_test admin_mange listen_addr_test"
+export _TEST_SUITE_account_auth="test-1-1 test-1-2 test-1-3 test-1-4 test-1-5"
+export _TEST_SUITE_user_conn_limit="test-2-1 test-2-2 test-2-3 test-2-4 test-2-5"
+export _TEST_SUITE_conn_multiplex="test-3-1 test-3-2 test-3-3 test-3-5 test-3-6 test-3-8 test-3-9"
+export _TEST_SUITE_conn_context="test-4-1 test-4-2 test-4-3 test-4-5 test-4-6 test-4-8"
+export _TEST_SUITE_bk_async_con="test-5-1"
+export _TEST_SUITE_rw_ro_service="test-6-1 test-6-2"
+export _TEST_SUITE_load_balance="test-8-1 test-8-2"
+export _TEST_SUITE_listen_addr_test="test-11-1 test-11-2 test-11-3 test-11-4 test-11-5"
+export _TEST_SUITE_bug_test="test-18-1 test-18-2 test-18-3 test-18-4 test-18-5 test-18-18"
+export _TEST_SUITE_admin_mange="test-19-1 test-19-2 test-19-3 test-19-4 test-19-5 test-19-6 test-19-7 test-19-8 test-19-9 test-19-10 test-19-11 test-19-12"
+export _TEST_SUITE_stress="test-20-1 test-20-2"
+

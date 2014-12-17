@@ -1,0 +1,64 @@
+#!/bin/bash
+################################################################
+# 参数说明
+# $1 需要检测的后端实例的ip地址
+# $2 需要检测的后端实例的端口地址
+# $3 检测后端采用的用户名
+# $4 检测后端用户名对应的密码
+################################################################
+
+################################################################
+# 输出格式说明
+# 接受的输出格式为:errno=0|1;status=xxxx;errmsg=slave thread is stopped
+# @note dbproxy 判断后端的死活仅通过errno来做。
+#       errno取值为0时,表示后端状态良好，
+#       errno取值非0,表示后端状态异常
+# 输出字段含义说明
+# errno:  指脚本执行检测的结果,取值为0表示状态正常，取值非0表示状态异常
+# status: 状态的补充信息 
+#         * no meaning  #changed by xchliu 20130826
+# errmsg: 检测的出错信息如：slave thread is stopped
+################################################################
+
+today=$(date '+%Y%m%d')
+#log=/opt/sohu/@PACKAGE_NAME@/var/log/dbproxy_pxc_status.$today.log
+log=$(dirname $0)/../var/log/dbproxy_pxc_status.$today.log
+
+
+sql_conn="mysql -h$1 -P$2 -u$3 -p$4"
+sql_result=''
+
+function logger(){
+    echo "`date '+%Y-%m-%d %H:%M:%S '` $0:  $1" >>$log
+}
+function get_data(){
+    #sql_result=`echo $1| ${sql_conn} |awk 'NR==2{print $1}'` 
+    sql_result=`echo $1| ${sql_conn} 2>/dev/null|awk 'NR==2{print $1}'` 
+}
+
+
+#main
+errno=-1
+##only try to get data once for each invoke by dbproxy 
+get_data "use information_schema;select variable_value into @wsrep_ready from GLOBAL_STATUS where variable_name='wsrep_ready';
+select variable_value into @wsrep_cluster_status from GLOBAL_STATUS where variable_name='wsrep_cluster_status';
+select variable_value into @wsrep_local_state from GLOBAL_STATUS where variable_name='wsrep_local_state';
+select variable_value into @wsrep_connected from GLOBAL_STATUS where variable_name='wsrep_connected';
+select if(@wsrep_ready='ON' and @wsrep_cluster_status='Primary' and @wsrep_local_state=4 and @wsrep_connected='ON',0,1) as wsrep_stat;"
+
+if [ $sql_result ];then
+    if [ $sql_result == 0  ];then
+        errmsg="Check finished with success "
+        logger "Check finished with success "
+        errno=0
+    elif [ $sql_result == 1 ];then
+        errmsg="Node is in a unstable stat!"
+        logger "Node is in a unstable stat!"
+        errno=1
+    fi
+else
+    errmsg="Failed to connect to $1:$2" 
+    logger "Failed to connect to $1:$2" 
+    errno=2
+fi
+echo "errno=$errno;status=Finished;errmsg=$errmsg"

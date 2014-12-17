@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<dbproxy version="1.0">
+  <mysql_proxy>
+    <multiplex>on</multiplex>
+    <sql_statistics_switch>on</sql_statistics_switch>
+    <sql_statistics_base>2</sql_statistics_base>
+    <rw_load_balance_algorithm>wrr</rw_load_balance_algorithm>
+    <ro_load_balance_algorithm>wrr</ro_load_balance_algorithm>
+    <rw_addresses>0.0.0.0:3456</rw_addresses>
+    <ro_addresses>0.0.0.0:3455</ro_addresses>
+    <table_engine_replace>on</table_engine_replace>
+    <black_list_flag>on</black_list_flag>
+    <dml_alter>on</dml_alter>
+    <dml_create>on</dml_create>
+    <dml_delete>on</dml_delete>
+    <dml_drop>off</dml_drop>
+    <dml_insert>on</dml_insert>
+    <dml_replace>on</dml_replace>
+    <dml_rename>on</dml_rename>
+    <dml_truncate>off</dml_truncate>
+    <dml_update>on</dml_update>
+  </mysql_proxy>
+  <slow-query-log>
+    <enabled>off</enabled>
+    <file>var/log/slow.log</file>
+    <execute-time>2</execute-time>
+  </slow-query-log>
+  <backends>
+    <default>
+      <rw_weight>2</rw_weight>
+      <ro_weight>2</ro_weight>
+      <rise>1</rise>
+      <fall>3</fall>
+      <inter>10</inter>
+      <fastdowninter>10</fastdowninter>
+    </default>
+    <backend address="${LOCAL_HOSTIP}:9801" type="rw">
+      <state>unknown</state>
+      <rw_weight>2</rw_weight>
+      <ro_weight>2</ro_weight>
+    </backend>
+    <backend address="${LOCAL_HOSTIP}:9802" type="ro">
+      <state>unknown</state>
+      <rw_weight>4</rw_weight>
+      <ro_weight>4</ro_weight>
+    </backend>
+    <backend address="${LOCAL_HOSTIP}:9803" type="ro">
+      <state>unknown</state>
+      <rw_weight>1</rw_weight>
+      <ro_weight>1</ro_weight>
+    </backend>
+  </backends>
+
+  <user_info>
+    <user name="test">
+      <password>test</password>
+      <ip_ranges>
+        <ip>127.0.0.1</ip>
+      </ip_ranges>
+    </user>
+  </user_info>
+
+  <conn_limit>
+    <conn_limit_rw>
+      <default_limit>
+        <max_connections>1000</max_connections>
+      </default_limit>
+      <limits>
+        <limit username="test" ip="127.0.0.1">
+          <max_connections>3000</max_connections>
+        </limit>
+      </limits>
+    </conn_limit_rw>
+    <conn_limit_ro>
+      <default_limit>
+        <max_connections>2000</max_connections>
+      </default_limit>
+      <limits>
+        <limit username="test" ip="127.0.0.1">
+          <max_connections>6000</max_connections>
+        </limit>
+      </limits>
+    </conn_limit_ro>
+  </conn_limit>
+
+  <pool_conf>
+    <pool_conf_rw>
+      <default_pool>
+        <min_connections>20</min_connections>
+        <max_connections>1000</max_connections>
+        <max_idle_interval>3600</max_idle_interval>
+      </default_pool>
+      <pools>
+        <pool username="test">
+          <min_connections>1</min_connections>
+          <max_connections>3000</max_connections>
+          <max_idle_interval>3600</max_idle_interval>
+        </pool>
+      </pools>
+    </pool_conf_rw>
+    <pool_conf_ro>
+      <default_pool>
+        <min_connections>20</min_connections>
+        <max_connections>1000</max_connections>
+        <max_idle_interval>3600</max_idle_interval>
+      </default_pool>
+      <pools>
+        <pool username="test">
+          <min_connections>1</min_connections>
+          <max_connections>6000</max_connections>
+          <max_idle_interval>3600</max_idle_interval>
+        </pool>
+      </pools>
+    </pool_conf_ro>
+  </pool_conf>
+
+  <sql_rules>
+    <sql_single>
+      <!--
+      <rule user="test" db="test" text="select * from t_user_info where id in (N)">
+        <action>SAFE</action>
+        <disabled>true</disabled>
+      </rule>
+      <rule user="test" db="test1" text="select * from t_user_info1 where id in (N)">
+        <action>LOG</action>
+        <disabled>true</disabled>
+      </rule>
+      <rule user="test" db="test2" text="select name from t_user_info2 where id in (N)">
+        <action>BLOCK</action>
+        <disabled>false</disabled>
+      </rule>
+      -->
+    </sql_single>
+    <sql_template>
+      <!--
+      <rule user="test" db="test" text="select name from student where id in (N)">
+        <action>SAFE</action>
+        <disabled>true</disabled>
+      </rule>
+      <rule user="test" db="zhenfan_db" text="select * from abc">
+        <action>log</action>
+        <disabled>true</disabled>
+      </rule>
+      -->
+    </sql_template>
+  </sql_rules>
+
+</dbproxy>

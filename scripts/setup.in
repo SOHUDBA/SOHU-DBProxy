@@ -1,0 +1,3476 @@
+#!/bin/bash
+##
+# @description 安装检查脚本
+# @histories
+#   1.2 2014-01-20 wenx 修改DBProxy安装目录为/opt/sohu/dbproxy
+#   1.1 2014-01-04 wenx 修改统计检查错误数；增加检查项；彩色日志
+#   1.0 2013-12-24 wenx init.
+declare -r VERSION=1.1
+
+##### common modules
+logger_log_level_num()
+{
+  declare -ir LOG_LEVEL_OFF=0
+  declare -ir LOG_LEVEL_ERROR=2
+  declare -ir LOG_LEVEL_WARN=3
+  declare -ir LOG_LEVEL_INFO=4
+  declare -ir LOG_LEVEL_DEBUG=5
+  declare -ir LOG_LEVEL_ALL=99
+  declare -r _lname=$1
+  declare _lfullname=""
+  declare _lnum=""
+  _lfullname="LOG_LEVEL_${_lname}"
+  _lnum="${!_lfullname}"
+  if [[ -z "$_lnum" ]]; then
+    echo "invalid log level: $_lname" >&2
+    return 1
+  else
+    echo "$_lnum"
+    return 0
+  fi
+}
+logger()
+{
+  declare -r No_Color='\e[0m'
+  declare -r Black='\e[0;30m'
+  declare -r Red='\e[0;31m'
+  declare -r Green='\e[0;32m'
+  declare -r Brown='\e[0;33m'
+  declare -r Blue='\e[0;34m'
+  declare -r Purple='\e[0;35m'
+  declare -r Cyan='\e[0;36m'
+  declare -r Light_Gray='\e[0;37m'
+  declare -r Dark_Gray='\e[1;30m'
+  declare -r Light_Red='\e[1;31m'
+  declare -r Light_Green='\e[1;32m'
+  declare -r Yellow='\e[1;33m'
+  declare -r Light_Blue='\e[1;34m'
+  declare -r Light_Purple='\e[1;35m'
+  declare -r Light_Cyan='\e[1;36m'
+  declare -r White='\e[1;37m'
+  declare -r _level=$1
+  shift
+  declare -i _level_num=0
+  declare _colored=""
+  _level_num=$(logger_log_level_num "$_level")
+  if ((LOG_LEVEL>=_level_num)); then
+    case "$_level" in
+      "ERROR") _colored="${Red}${_level}${No_Color}" ;;
+      "WARN") _colored="${Yellow}${_level}${No_Color}" ;;
+      "DEBUG") _colored="${Dark_Gray}${_level}${No_Color}" ;;
+      *) _colored="${_level}" ;;
+    esac
+    echo -e "$(date '+%Y-%m-%dT%H:%M:%S.%N') ${_colored} $@" >&2
+  fi
+}
+logger_error() { logger "ERROR" "$@"; }
+logger_warn() { logger "WARN" "$@"; }
+logger_info() { logger "INFO" "$@"; }
+logger_debug() { logger "DEBUG" "$@"; }
+
+
+assert()
+{
+  declare -i i=0
+  if ! test "$@"; then
+    logger_error "assert failed: $@"
+    for (( i=1; i<${#FUNCNAME[@]}; i++)) {
+      logger_error " at ${FUNCNAME[$i]} (${BASH_SOURCE[$i]}:${BASH_LINENO[$((i-1))]})"
+    }
+    exit 1
+  fi
+}
+
+eval_param()
+{
+  declare -r _k=${1%%=*}
+  declare -r _v=${1#*=}
+  declare -r _f="${_k}=${_v}"
+  logger_debug "eval $_f"
+  eval $_f
+}
+
+##
+# Compare two version strings
+# @param $1 1st version
+# @param $2 2nd version
+# @return 0 equal
+# @return 1 less
+# @return 2 greater
+compare_version()
+{
+  declare _v1=$1
+  declare _v2=$2
+  declare _v=""
+  if [ "$_v1" = "$_v2" ]; then
+    return 0
+  fi
+  _v=$(echo -e "${_v1}\n${_v2}" | sort -V | head -n1)
+  if [ "$_v1" = "$_v" ]; then
+    return 1
+  else
+    return 2
+  fi
+}
+
+
+##
+# Compare two version strings with an operator
+# @param $1 1st version
+# @param $2 operator
+# @param $3 2nd version
+# @return 0 true
+# @return 1 false
+compare_version2()
+{
+  declare _v1=$1
+  declare _op=$2
+  declare _v2=$3
+  declare -i _rc=1
+  compare_version "$_v1" "$_v2"
+  case $? in
+  0)
+    [ "$_op" = "-eq" -o "$_op" = "-le" -o "$_op" = "-ge" ] && _rc=0
+    ;;
+  1)
+    [ "$_op" = "-lt" -o "$_op" = "-le" -o "$_op" = "-ne" ] && _rc=0
+    ;;
+  2)
+    [ "$_op" = "-gt" -o "$_op" = "-ge" -o "$_op" = "-ne" ] && _rc=0
+    ;;
+  esac
+  return $_rc
+}
+
+
+shtest()
+{
+  declare _n=$1
+  declare -i _rc=0
+  shift
+  test "$@"
+  _rc=$?
+  if [ $_rc -ne 0 ]; then
+    logger_error "shtest \"$_n\" returns $_rc: $@"
+  fi
+  return $_rc
+}
+
+
+##
+# Get value from xml
+# @param $1 filename
+# @param $2 xpath
+# @return 0 ok
+# @return 1 error
+# @return 2 empty node set
+# @stdout value for the xpath
+get_xml_var()
+{
+  declare -r _xml=$1
+  declare -r _xpath=$2
+  declare _v=""
+  if [ -z "$_xpath" ]; then
+  	logger_error "xpath not specified ($_xml, $_xpath)"
+  	return 1
+  fi
+  if [ ! -f "$_xml" ]; then
+  	logger_error "xml not found ($_xml, $_xpath): $_xml"
+  	return 1
+  fi
+  if ! which xmllint >/dev/null; then
+  	logger_error "xmllint not found ($_xml, $_xpath)"
+  	return 1
+  fi
+
+  # check if node exists
+  _v=$( xmllint --shell "$_xml" <<<"cd $_xpath" 2>&1 >/dev/null )
+  if (( $? != 0 )); then
+  	logger_error "xmllint cd error ($_xml, $_xpath): $_v"
+  	return 1
+  fi
+  if [[ "$_v" != "" ]]; then
+  	if [[ $_v =~ is\ a\ 0\ Node\ Set ]]; then
+      logger_debug "xmllint cd warning, is a empty node set ($_xml, $_xpath): $_v"
+  	elif [[ $_v =~ is\ an\ empty\ Node\ Set ]]; then
+      logger_error "xmllint cd error, is a non-existent node set ($_xml, $_xpath): $_v"
+      return 2
+  	else
+      logger_error "xmllint cd error, may be no such node ($_xml, $_xpath): $_v"
+      return 1
+  	fi
+  fi
+
+  # read node
+  _v=$( (xmllint --shell "$_xml" <<<"cat $_xpath" | sed '/^\/ > /d') 2>&1 )
+  if (( $? != 0 )); then
+  	logger_error "xmllint cat error ($_xml, $_xpath): $_v"
+  	return 1
+  fi
+  echo "$_v"
+  return 0
+}
+
+##
+# Get value from cnf
+# @param $1 filename
+# @param $2 key name
+# @param $3 section name(Optional)
+# @return 0 ok
+# @return 1 error
+# @return 2 key not found
+# @return 3 too many keys
+# @return 4 section not found
+# @stdout value of the key
+get_cnf_var()
+{
+  declare -r _cnf=$1
+  declare -r _key=$2
+  declare -r _sect=$3
+  declare _v=""
+  if [ -z "$_key" ]; then
+  	logger_error "key not specified ($_cnf, $_sect, $_key)"
+  	return 1
+  fi
+  if [ ! -f "$_cnf" ]; then
+  	logger_error "cnf not found ($_cnf, $_sect, $_key)"
+  	return 1
+  fi
+
+  if [ -n "$_sect" ]; then
+    if ! grep -q "^\[$_sect\]$" "$_cnf"; then
+      logger_error "section not found ($_cnf, $_sect, $_key)"
+      return 4
+    fi
+  fi
+
+  if [ -z "$_sect" ]; then
+  	_v=$( ( grep "^$_key=" "$_cnf" | wc -l ) 2>&1 )
+  else
+    _v=$( ( sed -n '/^\['"$_sect"'\]$/,/^\[.*\]/p' "$_cnf" | grep "^$_key=" | wc -l ) 2>&1 )
+  fi
+  if (( $? != 0 )); then
+    logger_error "read cnf error ($_cnf, $_sect, $_key): $_v"
+    return 1
+  fi
+  if [[ $_v -eq 0 ]]; then
+    logger_error "key not found ($_cnf, $_sect, $_key): $_v"
+    return 2
+  fi
+  if [[ $_v -gt 1 ]]; then
+    logger_error "found more than 1 key ($_cnf, $_sect, $_key): $_v"
+    return 3
+  fi
+  _v=""
+
+  if [ -z "$_sect" ]; then
+    _v=$( sed -n "/^$_key=/s/^$_key=//p" "$_cnf" 2>&1 )
+  else
+    _v=$( ( sed -n '/^\['"$_sect"'\]$/,/^\[.*\]/{/^'"$_key"'=/s/^'"$_key"'=//p}' "$_cnf" ) 2>&1 )
+  fi
+  if (( $? != 0 )); then
+    logger_error "read cnf error ($_cnf, $_sect, $_key): $_v"
+    return 1
+  fi
+  echo "$_v"
+  return 0
+}
+
+find_exist_path()
+{
+  _d=$1
+  while [ -n "$_d" ]; do
+    if [ -d "$_d" ]; then
+      break
+    else
+      _d=${_d%/*}
+    fi
+  done
+  if [ -z "$_d" ]; then
+    _d="/"
+  fi
+  echo "$_d"
+}
+
+
+##### check
+get_os_release_mock()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  OS_RELEASE=$1
+  OS_RELEASE_MAJOR=${OS_RELEASE%%.*}
+}
+get_os_release()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  #OS_RELEASE=""
+  OS_RELEASE=$(lsb_release -r -s)
+  OS_RELEASE_MAJOR=${OS_RELEASE%%.*}
+}
+check_os_release()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  if [ -z "$OS_RELEASE" ]; then
+    logger_error "OS Release cannot be null"
+    return 1
+  fi
+  if [ -z "$OS_RELEASE_MAJOR" ]; then
+    logger_error "OS Release major cannot be null"
+    return 1
+  fi
+  if [ "$OS_RELEASE_MAJOR" = 5 ]; then
+    if compare_version2 "$OS_RELEASE" -ge 5.7; then
+      return 0
+    else
+      logger_error "OS Release must be 5.7+, actual:$OS_RELEASE"
+      return 2
+    fi
+  fi
+  if [ "$OS_RELEASE_MAJOR" = 6 ]; then
+    if compare_version2 "$OS_RELEASE" -ge 6.3; then
+      return 0
+    else
+      logger_error "OS Release must be 6.3+, actual:$OS_RELEASE"
+      return 3
+    fi
+  fi
+  logger_error "Unsupported OS Release: $OS_RELEASE"
+  return 4
+}
+
+
+get_os_arch_mock()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  OS_ARCH=$1
+}
+get_os_arch()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  #OS_ARCH=""
+  OS_ARCH=$(arch)
+}
+check_os_arch()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  if test "$OS_ARCH" = "x86_64"; then
+    return 0
+  else
+    logger_error "OS Arch must be x86_64: $OS_ARCH"
+    return 1
+  fi
+}
+
+
+get_core_file_size_mock()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  CORE_FILE_SIZE=$1
+  CORE_FILE_SIZE_CONF=$2
+}
+get_core_file_size()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  #CORE_FILE_SIZE=""
+  CORE_FILE_SIZE=$(ulimit -c)
+  CORE_FILE_SIZE_CONF="/etc/security/limits.conf"
+}
+check_core_file_size()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare -i _n1=0
+  declare _v1=0
+  declare -r _value="unlimited"
+  declare -r _conf="*           soft    core    ${_value}"
+  declare -r _f=$CORE_FILE_SIZE_CONF
+
+  _n1=$(sed -n "/^\*[[:space:]]\+soft[[:space:]]\+core[[:space:]]\+.*/=" "$_f" | tail -n1)
+  if ((_n1==0)); then
+    logger_error "Core file conf not found ($_f)"
+    return 1
+  else
+    _v1=$(sed -n "s/^\*[[:space:]]\+soft[[:space:]]\+core[[:space:]]\+\(.*\)/\1/p" "$_f" | tail -n1)
+    if [ "$_v1" != "${_value}" ]; then
+      logger_error "Core file conf is invalid ($_f), expected:${_value}, actual:$_v1"
+      return 1
+    fi
+  fi
+  if ! test "$CORE_FILE_SIZE" = "${_value}"; then
+    logger_error "Core file size must be ${_value}: $CORE_FILE_SIZE"
+    return 1
+  fi
+  return 0
+}
+fix_core_file_size()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare _v=$1
+  declare -i _n1=0
+  declare _v1=0
+  declare -r _value="unlimited"
+  declare -r _conf="*           soft    core    ${_value}"
+  declare -r _f=$CORE_FILE_SIZE_CONF
+
+  _n1=$(sed -n "/^\*[[:space:]]\+soft[[:space:]]\+core[[:space:]]\+.*/=" "$_f" | tail -n1)
+  if ((_n1==0)); then
+    logger_info "Adding config: $_f"
+    logger_info "$_conf"
+    echo "$_conf" >>$_f
+    logger_warn "Please relogin to make the change take effect."
+  else
+    _v1=$(sed -n "s/^\*[[:space:]]\+soft[[:space:]]\+core[[:space:]]\+\(.*\)/\1/p" "$_f" | tail -n1)
+    if [ "$_v1" != "${_value}" ]; then
+      logger_info "Modifying config: $_f"
+      logger_info "$_conf"
+      sed -i "${_n1}c $_conf" "$_f"
+      logger_warn "Please relogin to make the change take effect."
+    fi
+  fi
+  if ! test "$CORE_FILE_SIZE" = "${_value}"; then
+    logger_info "Changing Core file size from $CORE_FILE_SIZE to ${_value}"
+    logger_warn "Please run following commands: "
+    logger_warn "ulimit -c ${_value}"
+  fi
+  return 0
+}
+
+
+get_open_files_mock()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  OPEN_FILES=$1
+  OPEN_FILES_CONF=$2
+}
+get_open_files()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  #OPEN_FILES=""
+  OPEN_FILES=$(ulimit -n)
+  OPEN_FILES_CONF="/etc/security/limits.conf"
+}
+check_open_files()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare -i _n1=0
+  declare -i _v1=0
+  declare -r _value=131072
+  declare -r _conf1="*           soft    nofile  ${_value}"
+  declare -r _conf2="*           hard    nofile  ${_value}"
+  declare -r _f=$OPEN_FILES_CONF
+
+  _n1=$(sed -n "/^\*[[:space:]]\+soft[[:space:]]\+nofile[[:space:]]\+.*/=" "$_f" | tail -n1)
+  if ((_n1==0)); then
+    logger_error "Open files soft conf not found ($_f)"
+    return 1
+  else
+    _v1=$(sed -n "s/^\*[[:space:]]\+soft[[:space:]]\+nofile[[:space:]]\+\(.*\)/\1/p" "$_f" | tail -n1)
+    if ((_v1 < _value)); then
+      logger_error "Open files soft conf is invalid ($_f), expected:${_value}, actual:$_v1"
+      return 1
+    fi
+  fi
+
+  _n1=$(sed -n "/^\*[[:space:]]\+hard[[:space:]]\+nofile[[:space:]]\+.*/=" "$_f" | tail -n1)
+  if ((_n1==0)); then
+    logger_error "Open files hard conf not found ($_f)"
+    return 1
+  else
+    _v1=$(sed -n "s/^\*[[:space:]]\+hard[[:space:]]\+nofile[[:space:]]\+\(.*\)/\1/p" "$_f" | tail -n1)
+    if ((_v1 < _value)); then
+      logger_error "Open files hard conf is invalid ($_f), expected:${_value}, actual:$_v1"
+      return 1
+    fi
+  fi
+
+  if ! test "$OPEN_FILES" -ge ${_value}; then
+    logger_error "Open files must be ${_value}+: actual:$OPEN_FILES"
+    return 1
+  fi
+  return 0
+}
+fix_open_files()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare -i _n1=0
+  declare -i _v1=0
+  declare -r _value=131072
+  declare -r _conf1="*           soft    nofile  ${_value}"
+  declare -r _conf2="*           hard    nofile  ${_value}"
+  declare -r _f=$OPEN_FILES_CONF
+
+  _n1=$(sed -n "/^\*[[:space:]]\+soft[[:space:]]\+nofile[[:space:]]\+.*/=" "$_f" | tail -n1)
+  if ((_n1==0)); then
+    logger_info "Adding soft config: $_f"
+    logger_info "$_conf1"
+    echo "$_conf1" >>$_f
+    logger_warn "Please relogin to make the change take effect."
+  else
+    _v1=$(sed -n "s/^\*[[:space:]]\+soft[[:space:]]\+nofile[[:space:]]\+\(.*\)/\1/p" "$_f" | tail -n1)
+    if ((_v1 < _value)); then
+      logger_info "Modifying soft config: $_f"
+      logger_info "$_conf1"
+      sed -i "${_n1}c $_conf1" "$_f"
+      logger_warn "Please relogin to make the change take effect."
+    fi
+  fi
+
+  _n1=$(sed -n "/^\*[[:space:]]\+hard[[:space:]]\+nofile[[:space:]]\+.*/=" "$_f" | tail -n1)
+  if ((_n1==0)); then
+    logger_info "Adding hard config: $_f"
+    logger_info "$_conf2"
+    echo "$_conf2" >>$_f
+    logger_warn "Please relogin to make the change take effect."
+  else
+    _v1=$(sed -n "s/^\*[[:space:]]\+hard[[:space:]]\+nofile[[:space:]]\+\(.*\)/\1/p" "$_f" | tail -n1)
+    if ((_v1 < _value)); then
+      logger_info "Modifying hard config: $_f"
+      logger_info "$_conf2"
+      sed -i "${_n1}c $_conf2" "$_f"
+      logger_warn "Please relogin to make the change take effect."
+    fi
+  fi
+
+  if ! test "$OPEN_FILES" -ge ${_value}; then
+    logger_info "Changing Open files from $OPEN_FILES to ${_value}"
+    logger_warn "Please run following commands: "
+    logger_warn "ulimit -n ${_value}"
+    logger_warn "ulimit -H -n ${_value}"
+  fi
+  return 0
+}
+
+
+get_file_max_mock()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  FILE_MAX=$1
+  FILE_MAX_CONF=$2
+}
+get_file_max()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  #FILE_MAX=0
+  FILE_MAX=$(sysctl -n fs.file-max)
+  FILE_MAX_CONF="/etc/sysctl.conf"
+}
+check_file_max()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare -i _n1=0
+  declare -i _v1=0
+  declare -r _value=6815744
+  declare -r _conf="fs.file-max = ${_value}"
+  declare -r _f=$FILE_MAX_CONF
+
+  _n1=$(sed -n "/^fs.file-max[[:space:]]*=[[:space:]]*.*/=" "$_f" | tail -n1)
+  if ((_n1==0)); then
+    logger_error "File max conf not found ($_f)"
+    return 1
+  else
+    _v1=$(sed -n "s/^fs.file-max[[:space:]]*=[[:space:]]*\(.*\)/\1/p" "$_f" | tail -n1)
+    if ((_v1 < _value)); then
+      logger_error "File max conf is invalid ($_f), expected:${_value}, actual:$_v1"
+      return 1
+    fi
+  fi
+
+  if ! test "$FILE_MAX" -ge ${_value};then
+    logger_error "File max must be ${_value}+: actual:$FILE_MAX"
+    return 1
+  fi
+
+  return 0
+}
+fix_file_max()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare -i _n1=0
+  declare -i _v1=0
+  declare -r _value=6815744
+  declare -r _conf="fs.file-max = ${_value}"
+  declare -r _f=$FILE_MAX_CONF
+
+  _n1=$(sed -n "/^fs.file-max[[:space:]]*=[[:space:]]*.*/=" "$_f" | tail -n1)
+  if ((_n1==0)); then
+    logger_info "Adding config: $_f"
+    logger_info "$_conf"
+    echo "$_conf" >>$_f
+  else
+    _v1=$(sed -n "s/^fs.file-max[[:space:]]*=[[:space:]]*\(.*\)/\1/p" "$_f" | tail -n1)
+    if ((_v1 < _value)); then
+      logger_info "Modifying config: $_f"
+      logger_info "$_conf"
+      sed -i "${_n1}c $_conf" "$_f"
+    fi
+  fi
+
+  if ! test "$FILE_MAX" -ge ${_value};then
+    logger_info "Changing File max from $FILE_MAX to ${_value}"
+    sysctl -w fs.file-max=${_value}
+  fi
+
+  return 0
+}
+
+
+get_ip_nonlocal_bind_mock()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  IP_NONLOCAL_BIND=$1
+  IP_NONLOCAL_BIND_CONF=$2
+}
+get_ip_nonlocal_bind()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  #IP_NONLOCAL_BIND=0
+  IP_NONLOCAL_BIND=$(sysctl -n net.ipv4.ip_nonlocal_bind)
+  IP_NONLOCAL_BIND_CONF="/etc/sysctl.conf"
+}
+check_ip_nonlocal_bind()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare -i _n1=0
+  declare -i _v1=0
+  declare -r _value=1
+  declare -r _conf="net.ipv4.ip_nonlocal_bind = ${_value}"
+  declare -r _f=$IP_NONLOCAL_BIND_CONF
+
+  _n1=$(sed -n "/^net.ipv4.ip_nonlocal_bind[[:space:]]*=[[:space:]]*.*/=" "$_f" | tail -n1)
+  if ((_n1==0)); then
+    logger_error "IP nonlocal bind conf not found ($_f)"
+    return 1
+  else
+    _v1=$(sed -n "s/^net.ipv4.ip_nonlocal_bind[[:space:]]*=[[:space:]]*\(.*\)/\1/p" "$_f" | tail -n1)
+    if ((_v1 != _value)); then
+      logger_error "IP nonlocal bind conf is invalid ($_f), expected:${_value}, actual:$_v1"
+      return 1
+    fi
+  fi
+
+  if ! test "$IP_NONLOCAL_BIND" -eq ${_value};then
+    logger_error "IP nonlocal bind must be ${_value}: actual:$IP_NONLOCAL_BIND"
+    return 1
+  fi
+
+  return 0
+}
+fix_ip_nonlocal_bind()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare -i _n1=0
+  declare -i _v1=0
+  declare -r _value=1
+  declare -r _conf="net.ipv4.ip_nonlocal_bind = ${_value}"
+  declare -r _f=$IP_NONLOCAL_BIND_CONF
+
+  _n1=$(sed -n "/^net.ipv4.ip_nonlocal_bind[[:space:]]*=[[:space:]]*.*/=" "$_f" | tail -n1)
+  if ((_n1==0)); then
+    logger_info "Adding config: $_f"
+    logger_info "$_conf"
+    echo "$_conf" >>$_f
+  else
+    _v1=$(sed -n "s/^net.ipv4.ip_nonlocal_bind[[:space:]]*=[[:space:]]*\(.*\)/\1/p" "$_f" | tail -n1)
+    if ((_v1 != _value)); then
+      logger_info "Modifying config: $_f"
+      logger_info "$_conf"
+      sed -i "${_n1}c $_conf" "$_f"
+    fi
+  fi
+
+  if ! test "$IP_NONLOCAL_BIND" -eq ${_value};then
+    sysctl -w net.ipv4.ip_nonlocal_bind=${_value}
+  fi
+
+  return 0
+}
+
+
+get_libxml2_mock()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  LIBXML2=$1
+}
+get_libxml2()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  LIBXML2=$(rpm -q --qf "%{V}" libxml2.x86_64)
+}
+check_libxml2()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  if [ -z "$LIBXML2" ]; then
+    logger_error "Libxml2 not installed"
+    return 1
+  fi
+  if compare_version2 "$LIBXML2" -lt "2.6"; then
+    logger_error "Libxml2 must be 2.6+, actual:$LIBXML2"
+    return 1
+  fi
+  return 0
+}
+fix_libxml2()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  if [ -z "$LIBXML2" ]; then
+    logger_info "Install Libxml2"
+    yum -y install libxml2.x86_64
+  fi
+}
+
+
+get_rsync_mock()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  RSYNC=$1
+}
+get_rsync()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  RSYNC=$(rpm -q --qf "%{V}" rsync.x86_64)
+}
+check_rsync()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare _v=$1
+  if [ -z "$RSYNC" ]; then
+    logger_error "Rsync not installed"
+    return 1
+  fi
+  if compare_version2 "$RSYNC" -lt "3.0"; then
+    logger_error "Rsync must be 3.0+, actual:$RSYNC"
+    return 1
+  fi
+  return 0
+}
+fix_rsync()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  if [ -z "$RSYNC" ]; then
+    logger_info "Install Rsync"
+    yum -y install rsync.x86_64
+  fi
+}
+
+
+get_mysql_client_mock()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  MYSQL_CLIENT=$1
+  MYSQL_CLIENT_VERSION=$2
+}
+get_mysql_client()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  MYSQL_CLIENT=${MYSQL_HOME}/bin/mysql
+  MYSQL_CLIENT_VERSION=$($MYSQL_CLIENT -V | sed -n 's/.* Distrib \([0-9.]\+\),.*/\1/p')
+}
+check_mysql_client()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare _v=$1
+  _v=$($MYSQL_CLIENT -V 2>&1)
+  if (($? != 0)); then
+    logger_error "MySQL client not installed: $MYSQL_CLIENT: $_v"
+    return 1
+  fi
+  if compare_version2 "$MYSQL_CLIENT_VERSION" -lt "5.1"; then
+    logger_error "MySQL Client must be 5.1+, actual:$MYSQL_CLIENT_VERSION"
+    return 1
+  fi
+  return 0
+}
+
+
+get_cpu_count_mock()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  CPU_COUNT=$1
+}
+get_cpu_count()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  if which nproc >/dev/null; then
+    CPU_COUNT=$(nproc)
+  else
+    CPU_COUNT=$(grep -c ^processor /proc/cpuinfo)
+  fi
+}
+check_cpu_count()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  if ((CPU_COUNT < 8)); then
+    logger_error "CPU Count must be at least 8, actual:$CPU_COUNT"
+    return 1
+  fi
+}
+
+
+get_free_memory_mock()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  FREE_MEMORY=$1
+}
+get_free_memory()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  FREE_MEMORY=$(free | awk 'NR==3{print $4}')
+}
+check_free_memory()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  if ((FREE_MEMORY<500*1024)); then
+    logger_error "Free Memory must be at least 500M, actual:$FREE_MEMORY"
+    return 1
+  fi
+}
+
+
+get_free_disk()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare _d=""
+  declare -i _f=0
+  _d=$(find_exist_path "$PROXY_BASE")
+  _f=$(df -k -P "$_d" | awk 'NR==2{print $4}')
+  FREE_DISK=$_f
+}
+check_free_disk()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  if (( FREE_DISK < 1*1024*1024 )); then
+    logger_error "Free Disk must be at least 1G, actual:$_d=$_f"
+    return 1
+  fi
+}
+
+
+get_proxy_base_mock()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  PROXY_BASE=$1
+}
+check_proxy_base()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  if [ ! -d "$PROXY_BASE" ]; then
+    logger_error "PROXY_BASE not found: $PROXY_BASE"
+    return 1
+  fi
+  return 0
+}
+
+
+get_proxy_tar_mock()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  PROXY_TAR=$1
+}
+get_proxy_tar()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  PROXY_TAR=$DBA_DELIVERY/${PROXY_VERSION}/mysql-proxy-${PROXY_VERSION_MAJOR}-bin.el${OS_RELEASE_MAJOR}.tar.gz
+}
+precheck_proxy_tar()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  if [[ $PROXY_TAR =~ ^http:\/\/ || $PROXY_TAR =~ ^ftp:\/\/ ]]; then
+    if ! wget -q --spider ${PROXY_TAR}; then
+      logger_error "Proxy tar not found: ${PROXY_TAR}"
+      return 1
+    fi
+  else
+    if ! test -f ${PROXY_TAR}; then
+      logger_error "Proxy tar not found: ${PROXY_TAR}"
+      return 1
+    fi
+  fi
+  return 0
+}
+
+
+get_proxy_home_mock()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  PROXY_HOME=$1
+}
+get_proxy_home()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  # get_proxy_tar
+  # if [[ $PROXY_TAR =~ ^http:\/\/ || $PROXY_TAR =~ ^ftp:\/\/ ]]; then
+  #   PROXY_HOME=$(wget -q -O - ${PROXY_TAR} | tar -ztf - | head -n1)
+  # else
+  #   PROXY_HOME=$(tar -ztf ${PROXY_TAR} | head -n1)
+  # fi
+  # PROXY_HOME=${PROXY_HOME%/}
+  # PROXY_HOME=${PROXY_BASE}/${PROXY_HOME}
+  if [ -z "$PROXY_HOME" ]; then
+    PROXY_HOME=${PROXY_BASE}/mysql-proxy-${PROXY_VERSION_MAJOR}-bin
+  fi
+}
+precheck_proxy_home()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  if [ -z "$PROXY_HOME" ]; then
+    logger_error "PROXY_HOME not specified"
+    return 1
+  fi
+  if [ "${PROXY_HOME:0:1}" != "/" ];then
+    logger_error "PROXY_HOME not abs path: $PROXY_HOME"
+    return 1
+  fi
+  if [ -d "$PROXY_HOME" ]; then
+    if [ $(ls $PROXY_HOME | wc -l) -eq 0 ]; then
+      :
+    else
+      logger_error "PROXY_HOME exists and not empty: $PROXY_HOME"
+      return 1
+    fi
+  fi
+  return 0
+}
+postcheck_proxy_home()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  if [ -z "$PROXY_HOME" ]; then
+    logger_error "PROXY_HOME not specified"
+    return 1
+  fi
+  if [ "${PROXY_HOME:0:1}" != "/" ];then
+    logger_error "PROXY_HOME not abs path: $PROXY_HOME"
+    return 1
+  fi
+  if [ ! -d "$PROXY_HOME" ]; then
+    logger_error "PROXY_HOME not exist: $PROXY_HOME"
+    return 1
+  fi
+  if [ $(ls $PROXY_HOME | wc -l) -eq 0 ]; then
+    logger_error "PROXY_HOME empty: $PROXY_HOME"
+    return 1
+  fi
+  return 0
+}
+
+
+get_keepalived_mock()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  KEEPALIVED=$1
+  KEEPALIVED_VERSION=$2
+  KEEPALIVED_PATH=$3
+}
+check_keepalived()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare _ver=""
+  declare _std=""
+  _std=$(which $KEEPALIVED 2>&1)
+  if (($?!=0)); then
+    logger_error "KEEPALIVED not installed: $KEEPALIVED: $_std"
+    return 1
+  fi
+  if [ -z "$KEEPALIVED_VERSION" ]; then
+    _std=$($KEEPALIVED -v 2>&1)
+    if (($?!=0)); then
+      logger_error "KEEPALIVED -v failed: $KEEPALIVED: $_std"
+    else
+      _ver=$(echo "$_std" | awk '{print $2}')
+    fi
+  else
+    _ver=$KEEPALIVED_VERSION
+  fi
+  if [ "$_ver" != "v1.2.7" ]; then
+    logger_error "KEEPALIVED version must be v1.2.7, actual:$_ver"
+    return 1
+  fi
+  if [ ! -d "$KEEPALIVED_PATH" ]; then
+    logger_error "KEEPALIVED_PATH not exist: $KEEPALIVED_PATH"
+    return 1
+  fi
+  return 0
+}
+
+
+get_keepalived_script_tar_mock()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  KEEPALIVED_SCRIPT_TAR=$1
+  KEEPALIVED_SCRIPT_TAR_VERSION=$2
+}
+get_keepalived_script_tar()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  KEEPALIVED_SCRIPT_TAR=$DBA_DELIVERY/${PROXY_VERSION}/dbproxy_notify.sh
+}
+precheck_keepalived_script_tar()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare _ver=""
+  declare _tmp="/tmp/dbproxy_install_keepalived_script_tar"
+  if [[ $KEEPALIVED_SCRIPT_TAR =~ ^http:\/\/ || $KEEPALIVED_SCRIPT_TAR =~ ^ftp:\/\/ ]]; then
+    if ! wget -q --spider ${KEEPALIVED_SCRIPT_TAR}; then
+      logger_error "Keepalived check script tar not found: ${KEEPALIVED_SCRIPT_TAR}"
+      return 1
+    else
+      wget -q -O "$_tmp" ${KEEPALIVED_SCRIPT_TAR}
+    fi
+  else
+    if ! test -f ${KEEPALIVED_SCRIPT_TAR}; then
+      logger_error "Keepalived check script tar not found: ${KEEPALIVED_SCRIPT_TAR}"
+      return 1
+    else
+      rsync ${KEEPALIVED_SCRIPT_TAR} "$_tmp"
+    fi
+  fi
+  if [ -z "$KEEPALIVED_SCRIPT_TAR_VERSION" ]; then
+    chmod u+x "$_tmp"
+    _ver=$($_tmp -V | awk '{print $2}')
+    rm -f "$_tmp"
+  else
+    _ver=$KEEPALIVED_SCRIPT_TAR_VERSION
+  fi
+  if [ "$_ver" != "1.0.7" ]; then
+    logger_error "KEEPALIVED_SCRIPT_TAR version must be 1.0.7, actual:$_ver"
+    return 1
+  fi
+  return 0
+}
+
+
+get_keepalived_script_mock()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  KEEPALIVED_SCRIPT=$1
+  KEEPALIVED_SCRIPT_VERSION=$2
+}
+get_keepalived_script()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  KEEPALIVED_SCRIPT=/etc/keepalived/dbproxy_notify.sh
+}
+precheck_keepalived_script()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  logger_debug "precheck_keepalived_script is dummy"
+}
+postcheck_keepalived_script()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare _ver=""
+  if ! test -f ${KEEPALIVED_SCRIPT}; then
+    logger_error "Keepalived check script not found: ${KEEPALIVED_SCRIPT}"
+    return 1
+  fi
+  if [ -z "$KEEPALIVED_SCRIPT_VERSION" ]; then
+    _ver=$(${KEEPALIVED_SCRIPT} -V | awk '{print $2}')
+  else
+    _ver=$KEEPALIVED_SCRIPT_VERSION
+  fi
+  if [ "$_ver" != "1.0.7" ]; then
+    logger_error "KEEPALIVED_SCRIPT version must be 1.0.7, actual:$_ver"
+    return 1
+  fi
+  return 0
+}
+
+
+check_ssh()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare -i _i=0
+  declare -i _j=0
+  declare _ip1
+  declare _ip2
+  declare -i _rc=0
+  for ((_i=0; _i<${#DATABASE_ARRAY[@]}; _i++)); do
+    _ip1=${DATABASE_IP_ARRAY[$_i]}
+    logger_debug "SSH to ${_ip1}"
+    if ! $SSH -n ${_ip1} ":"; then
+      logger_error "SSH connection error: ${_ip1}"
+      ((_rc++))
+      continue
+    fi
+    for ((_j=0; _j<${#DATABASE_ARRAY[@]}; _j++)); do
+      _ip2=${DATABASE_IP_ARRAY[$_j]}
+      logger_debug "SSH from ${_ip1} to ${_ip2}"
+      if ! $SSH -n ${_ip1} "$SSH -n ${_ip2} ':'"; then
+        logger_error "SSH connection error: from ${_ip1} to ${_ip2}"
+        ((_rc++))
+      fi
+    done
+  done
+  return $_rc
+}
+
+
+check_database()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare -i _i=0
+  declare _ip
+  declare _port
+  declare -i _rc=0
+  declare _std=""
+  for ((_i=0; _i<${#DATABASE_ARRAY[@]}; _i++)); do
+    _ip=${DATABASE_IP_ARRAY[$_i]}
+    _port=${DATABASE_PORT_ARRAY[$_i]}
+    logger_debug "mysql ${_ip}:${_port}"
+    _std=$($SSH -n ${_ip} "$MYSQL_CLIENT -h127.0.0.1 -P${_port} -u root -ABs -e 'select 314159'" 2>&1)
+    if (($?!=0)); then
+      logger_error "MySQL connection error: ${_ip}:${_port}: $_std"
+      ((_rc++))
+    else
+      if [ "$_std" != "314159" ]; then
+        logger_error "MySQL connection error2: ${_ip}:${_port}: $_std"
+        ((_rc++))
+      fi
+    fi
+  done
+  return $_rc
+}
+
+
+check_os_account()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare _std=""
+  _std=$(id -u -n zabbix 2>&1)
+  if [ "$_std" != "zabbix" ]; then
+    logger_error "user zabbix not found: $_std"
+    return 1
+  fi
+  _std=$(id -g -n zabbix 2>&1)
+  if [ "$_std" != "zabbix" ]; then
+    logger_error "group zabbix not found: $_std"
+    return 1
+  fi
+}
+
+
+postcheck_proxy_install()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  if [ -z "$PROXY_HOME" ]; then
+    logger_error "PROXY_HOME not specified"
+    return 1
+  fi
+  if [ ! -d "$PROXY_HOME" ]; then
+    logger_error "PROXY_HOME not exists"
+    return 1
+  fi
+  if [ ! -x "$PROXY_HOME/bin/mysql-proxy" ]; then
+    logger_error "mysql-proxy not exists: $PROXY_HOME/bin/mysql-proxy"
+    return 1
+  fi
+  if [ ! -x "$PROXY_HOME/bin/zabbix_agentd" ]; then
+    logger_error "zabbix_agentd not exists: $PROXY_HOME/bin/zabbix_agentd"
+    return 1
+  fi
+}
+
+
+
+get_character_set_b4_mock()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  CHARACTER_SET=$1
+}
+get_character_set_b4()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  if [ -n "$CHARACTER_SET" ]; then
+    return 0
+  else
+    logger_warn "CHARACTER_SET not specified, use DB_CHARSET: $DB_CHARSET"
+    CHARACTER_SET=$DB_CHARSET
+  fi
+  return 0
+}
+check_character_set_b4()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  if [ -z "$DB_CHARSET" -a -n "$CHARACTER_SET" ]; then
+    logger_error "CHARACTER_SET and DB_CHARSET all null"
+    return 1
+  fi
+  if [ "$DB_CHARSET" != "$CHARACTER_SET" ]; then
+    logger_error "charset not match: db=$DB_CHARSET proxy=$CHARACTER_SET"
+    return 1
+  fi
+}
+
+get_character_set_mock()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  CHARACTER_SET=$1
+}
+get_character_set()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare _v=""
+  declare -i _rc=0
+  _v=$(get_cnf_var "$PROXY_HOME/etc/mysql-proxy.cnf" "dbproxy-collation" "mysql-proxy")
+  if (( _rc != 0 )); then
+    logger_error "read character_set from cnf error: $_v"
+    CHARACTER_SET=""
+    return 1
+  else
+    CHARACTER_SET=$_v
+  fi
+  return 0
+}
+check_character_set()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  if [ -z "$DB_CHARSET" -a -n "$CHARACTER_SET" ]; then
+    logger_error "CHARACTER_SET and DB_CHARSET all null"
+    return 1
+  fi
+  if [ "$DB_CHARSET" != "$CHARACTER_SET" ]; then
+    logger_error "charset not match: db=$DB_CHARSET proxy=$CHARACTER_SET"
+    return 1
+  fi
+}
+
+
+get_db_charset_mock()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  DB_CHARSET=$1
+}
+get_db_charset()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare _ip0
+  declare _port0
+  declare _std=""
+  if [ ${#DATABASE_ARRAY[@]} -eq 0 ]; then
+    return 0
+  fi
+  _ip0=${DATABASE_IP_ARRAY[0]}
+  _port0=${DATABASE_PORT_ARRAY[0]}
+  #logger_debug "_ip0=$_ip0 _port0=$_port0"
+  _std=$($SSH -n ${_ip0} "$MYSQL_CLIENT -h127.0.0.1 -P${_port0} -u root -ABs -e 'show global variables like \"collation_database\"'")
+  if (($?!=0)); then
+    logger_error "get db charset error: $_std"
+    return 1
+  fi
+  DB_CHARSET=$(echo "$_std" | awk '{print $2}')
+}
+check_db_charset()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  logger_debug "check_db_charset is dummy"
+  return 0
+}
+
+
+postcheck_config_os_privilege()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare -i _i=0
+  declare _v
+  if [ -z "$PROXY_HOME" ]; then
+    logger_error "PROXY_HOME not specified"
+    ((_i++))
+  fi
+  if [ -f "$PROXY_HOME/etc/zabbix_agentd.cnf" ]; then
+    _v=$(stat -c "%U:%G" "$PROXY_HOME/etc/zabbix_agentd.cnf")
+    if [ "$_v" != "zabbix:zabbix" ]; then
+      logger_error "zabbix_agentd.cnf has wrong owner. expected:zabbix:zabbix, actual:$_v"
+      ((_i++))
+    fi
+  fi
+  if [ -f "$PROXY_HOME/bin/pxc_check_status" ]; then
+    _v=$(stat -c "%a" "$PROXY_HOME/bin/pxc_check_status")
+    if [ "$_v" != "755" ]; then
+      logger_error "pxc_check_status has wrong mode. expected:755, actual:$_v"
+      ((_i++))
+    fi
+    _v=$(stat -c "%U:%G" "$PROXY_HOME/bin/pxc_check_status")
+    if [ "$_v" != "zabbix:zabbix" ]; then
+      logger_error "pxc_check_status has wrong owner. expected:zabbix:zabbix, actual:$_v"
+      ((_i++))
+    fi
+  fi
+  if [ -f "$PROXY_HOME/bin/mysql_check_status" ]; then
+    _v=$(stat -c "%a" "$PROXY_HOME/bin/mysql_check_status")
+    if [ "$_v" != "755" ]; then
+      logger_error "mysql_check_status has wrong mode. expected:755, actual:$_v"
+      ((_i++))
+    fi
+    _v=$(stat -c "%U:%G" "$PROXY_HOME/bin/mysql_check_status")
+    if [ "$_v" != "zabbix:zabbix" ]; then
+      logger_error "mysql_check_status has wrong owner. expected:zabbix:zabbix, actual:$_v"
+      ((_i++))
+    fi
+  fi
+  if [ -d "$PROXY_HOME/var" ]; then
+    _v=$(stat -c "%U:%G" "$PROXY_HOME/var")
+    if [ "$_v" != "zabbix:zabbix" ]; then
+      logger_error "var has wrong owner. expected:zabbix:zabbix, actual:$_v"
+      ((_i++))
+    fi
+    _v=$(stat -c "%U:%G" "$PROXY_HOME/var/log")
+    if [ "$_v" != "zabbix:zabbix" ]; then
+      logger_error "var/log has wrong owner. expected:zabbix:zabbix, actual:$_v"
+      ((_i++))
+    fi
+  else
+    logger_error "var not found: $PROXY_HOME/var"
+    ((_i++))
+  fi
+  if [ -f "$PROXY_HOME/etc/mysql-proxy.xml" ]; then
+    _v=$(stat -c "%a" "$PROXY_HOME/etc/mysql-proxy.xml")
+    if [ "$_v" != "660" ]; then
+      logger_error "mysql-proxy.xml has wrong mode. expected:660, actual:$_v"
+      ((_i++))
+    fi
+  fi
+  if [ -f "$PROXY_HOME/etc/mysql-proxy.cnf" ]; then
+    _v=$(stat -c "%a" "$PROXY_HOME/etc/mysql-proxy.cnf")
+    if [ "$_v" != "660" ]; then
+      logger_error "mysql-proxy.cnf has wrong mode. expected:660, actual:$_v"
+      ((_i++))
+    fi
+  fi
+  return $_i
+}
+
+
+
+##### install
+
+install_os_account()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  logger_info "install os account"
+  if ! id zabbix >/dev/null 2>&1; then
+    groupadd zabbix >/dev/null 2>&1
+    useradd -g zabbix zabbix >/dev/null 2>&1
+  fi
+}
+
+install_proxy_tar()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  logger_info "install proxy tar"
+  if [[ $PROXY_TAR =~ ^http:\/\/ || $PROXY_TAR =~ ^ftp:\/\/ ]]; then
+    wget -q -O - ${PROXY_TAR} | tar -C $PROXY_BASE -zxf -
+  else
+    tar -C $PROXY_BASE -zxf ${PROXY_TAR}
+  fi
+}
+
+install_proxy_path()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  logger_info "make proxy dir"
+  [ ! -d "$PROXY_HOME/var" ] && mkdir -p $PROXY_HOME/var
+  [ ! -d "$PROXY_HOME/var/lock" ] && mkdir -p $PROXY_HOME/var/lock
+  [ ! -d "$PROXY_HOME/var/lock/subsys" ] && mkdir -p $PROXY_HOME/var/lock/subsys
+  [ ! -d "$PROXY_HOME/var/log" ] && mkdir -p $PROXY_HOME/var/log
+  return 0
+}
+
+install_keepalived_script()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  logger_info "install keepalived script"
+  if [[ $KEEPALIVED_SCRIPT_TAR =~ ^http:\/\/ || $KEEPALIVED_SCRIPT_TAR =~ ^ftp:\/\/ ]]; then
+    wget -q -O ${KEEPALIVED_SCRIPT} ${KEEPALIVED_SCRIPT_TAR}
+  else
+    rsync ${KEEPALIVED_SCRIPT_TAR} ${KEEPALIVED_SCRIPT}
+  fi
+  chmod +x ${KEEPALIVED_SCRIPT}
+}
+
+
+
+##### write config
+
+write_proxy_cnf()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare -r _cnf="$PROXY_HOME/etc/mysql-proxy.cnf"
+  declare -r _cnf_bak="$PROXY_HOME/etc/mysql-proxy.cnf.${TIMESTAMP}"
+  declare _charset=${CHARACTER_SET:-"$DB_CHARSET"}
+
+  if [ -f "$_cnf" ]; then
+    if [[ "$OVERWRITE" = "Y" ]]; then
+      logger_info "backup proxy cnf: $_cnf_bak"
+      cp -p "$_cnf" "$_cnf_bak"
+    else
+      logger_warn "proxy cnf exists, OVERWRITE is forbidden: $_cnf"
+      return 0
+    fi
+  fi
+
+  logger_info "write proxy cnf: $_cnf"
+  cat >"$_cnf" <<EOF
+[mysql-proxy]
+admin-address=127.0.0.1:3457
+plugin-dir=lib/mysql-proxy/plugins/
+config-xml=etc/mysql-proxy.xml
+plugins=proxy,admin
+admin-username=admin
+admin-password=admin
+pid-file=var/log/mysql-proxy.pid
+log-file=var/log/mysql-proxy.log
+log-level=warning
+keepalive=true
+daemon=true
+event-threads=8
+max-open-files=60000
+max-core-size=unlimited
+dbproxy-collation=$_charset
+EOF
+}
+postcheck_proxy_cnf()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare _v
+  declare -i _rc=0
+  declare _cnf="$PROXY_HOME/etc/mysql-proxy.cnf"
+
+  if [ ! -f "$_cnf" ]; then
+    logger_error "mysql-proxy.cnf not found: $_cnf"
+    return 1
+  fi
+
+  if [ "$DB_CHARSET" != "$CHARACTER_SET" ]; then
+    logger_error "CHARACTER_SET not match: db=$DB_CHARSET proxy=$CHARACTER_SET"
+    ((_rc++))
+  fi
+
+  _v=$(get_cnf_var "$_cnf" "log-level" "mysql-proxy")
+  if [ "warning" != "$_v" -a "critical" != "$_v" ]; then
+    logger_error "log-level should be warning or critical. actual:$_v"
+    ((_rc++))
+  fi
+
+  _v=$(get_cnf_var "$_cnf" "admin-address" "mysql-proxy")
+  if [ "127.0.0.1:3457" != "$_v" ]; then
+    logger_error "admin-address must be 127.0.0.1:3457, actual: $_v"
+    ((_rc++))
+  fi
+
+  if ((_rc!=0)); then
+    logger_error "check proxy cnf error: $_cnf"
+  fi
+  return $_rc
+}
+
+write_proxy_xml()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare -i _i=0
+  declare _ip
+  declare _port
+  declare _type
+  declare -i _rc=0
+  declare -r _cnf="$PROXY_HOME/etc/mysql-proxy.xml"
+  declare -r _cnf_bak="$PROXY_HOME/etc/mysql-proxy.xml.${TIMESTAMP}"
+
+  if [ -f "$_cnf" ]; then
+    if [[ "$OVERWRITE" = "Y" ]]; then
+      logger_info "backup proxy xml: $_cnf_bak"
+      cp -p "$_cnf" "$_cnf_bak"
+    else
+      logger_warn "proxy xml exists, OVERWRITE is forbidden: $_cnf"
+      return 0
+    fi
+  fi
+
+  logger_info "write proxy xml: $_cnf"
+  >"$_cnf"
+
+  logger_debug "add proxyconf"
+  cat >>"$_cnf" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<dbproxy version="1.0">
+  <mysql_proxy>
+    <multiplex>on</multiplex>
+    <sql_statistics_switch>on</sql_statistics_switch>
+    <sql_statistics_base>2</sql_statistics_base>
+    <rw_load_balance_algorithm>wrr</rw_load_balance_algorithm>
+    <ro_load_balance_algorithm>wrr</ro_load_balance_algorithm>
+    <rw_addresses>$RW_ADDRESS_CSV</rw_addresses>
+    <ro_addresses>$RO_ADDRESS_CSV</ro_addresses>
+  </mysql_proxy>
+  <slow-query-log>
+    <enabled>off</enabled>
+    <file>var/log/slow.log</file>
+    <execute-time>2</execute-time>
+  </slow-query-log>
+  <backends>
+    <default>
+      <rw_weight>2</rw_weight>
+      <ro_weight>2</ro_weight>
+      <rise>1</rise>
+      <fall>3</fall>
+      <inter>10</inter>
+      <fastdowninter>10</fastdowninter>
+    </default>
+EOF
+
+  logger_debug "add backend"
+  for ((_i=0; _i<${#DATABASE_ARRAY[@]}; _i++)); do
+    _ip=${DATABASE_IP_ARRAY[$_i]}
+    _port=${DATABASE_PORT_ARRAY[$_i]}
+    if ((_i==0)); then
+      _type="rw"
+    else
+      _type="ro"
+    fi
+    logger_debug "add backend: ${_ip}:${_port}:${_type}"
+    cat >>"$_cnf" <<EOF
+    <backend address="${_ip}:${_port}" type="${_type}">
+      <state>unknown</state>
+      <rw_weight>2</rw_weight>
+      <ro_weight>2</ro_weight>
+    </backend>
+EOF
+  done
+
+  logger_debug "add poolconf"
+  cat >>"$_cnf" <<EOF
+  </backends>
+  <user_info>
+    <user name="${PINGMYSQL_USER}">
+      <password>${PINGMYSQL_PWD}</password>
+      <ip_ranges>
+        <ip>X.X.X.X</ip>
+        <ip>X.X.X.X</ip>
+        <ip>X.X.X.X</ip>
+        <ip>X.X.X.X</ip>
+        <ip>X.X.X.X</ip>
+        <ip>X.X.X.X</ip>
+        <ip>X.X.X.X</ip>
+        <ip>X.X.X.X</ip>
+      </ip_ranges>
+    </user>
+  </user_info>
+  <conn_limit>
+    <conn_limit_rw>
+      <default_limit>
+        <max_connections>1000</max_connections>
+      </default_limit>
+      <limits>
+        <limit username="${PINGMYSQL_USER}" ip="X.X.X.X">
+          <max_connections>10</max_connections>
+        </limit>
+        <limit username="${PINGMYSQL_USER}" ip="X.X.X.X">
+          <max_connections>10</max_connections>
+        </limit>
+        <limit username="${PINGMYSQL_USER}" ip="X.X.X.X">
+          <max_connections>10</max_connections>
+        </limit>
+        <limit username="${PINGMYSQL_USER}" ip="X.X.X.X">
+          <max_connections>10</max_connections>
+        </limit>
+        <limit username="${PINGMYSQL_USER}" ip="X.X.X.X">
+          <max_connections>10</max_connections>
+        </limit>
+        <limit username="${PINGMYSQL_USER}" ip="X.X.X.X">
+          <max_connections>10</max_connections>
+        </limit>
+        <limit username="${PINGMYSQL_USER}" ip="X.X.X.X">
+          <max_connections>10</max_connections>
+        </limit>
+        <limit username="${PINGMYSQL_USER}" ip="X.X.X.X">
+          <max_connections>10</max_connections>
+        </limit>
+        <limit username="${PINGMYSQL_USER}" ip="X.X.X.X">
+          <max_connections>10</max_connections>
+        </limit>
+      </limits>
+    </conn_limit_rw>
+    <conn_limit_ro>
+      <default_limit>
+        <max_connections>2000</max_connections>
+      </default_limit>
+      <limits>
+        <limit username="${PINGMYSQL_USER}" ip="X.X.X.X">
+          <max_connections>10</max_connections>
+        </limit>
+        <limit username="${PINGMYSQL_USER}" ip="X.X.X.X">
+          <max_connections>10</max_connections>
+        </limit>
+        <limit username="${PINGMYSQL_USER}" ip="X.X.X.X">
+          <max_connections>10</max_connections>
+        </limit>
+        <limit username="${PINGMYSQL_USER}" ip="X.X.X.X">
+          <max_connections>10</max_connections>
+        </limit>
+        <limit username="${PINGMYSQL_USER}" ip="X.X.X.X">
+          <max_connections>10</max_connections>
+        </limit>
+        <limit username="${PINGMYSQL_USER}" ip="X.X.X.X">
+          <max_connections>10</max_connections>
+        </limit>
+        <limit username="${PINGMYSQL_USER}" ip="X.X.X.X">
+          <max_connections>10</max_connections>
+        </limit>
+        <limit username="${PINGMYSQL_USER}" ip="X.X.X.X">
+          <max_connections>10</max_connections>
+        </limit>
+        <limit username="${PINGMYSQL_USER}" ip="X.X.X.X">
+          <max_connections>10</max_connections>
+        </limit>
+      </limits>
+    </conn_limit_ro>
+  </conn_limit>
+  <pool_conf>
+    <pool_conf_rw>
+      <default_pool>
+        <min_connections>0</min_connections>
+        <max_connections>1000</max_connections>
+        <max_idle_interval>1800</max_idle_interval>
+      </default_pool>
+      <pools>
+        <pool username="${PINGMYSQL_USER}">
+          <min_connections>0</min_connections>
+          <max_connections>10</max_connections>
+          <max_idle_interval>180</max_idle_interval>
+        </pool>
+      </pools>
+    </pool_conf_rw>
+    <pool_conf_ro>
+      <default_pool>
+        <min_connections>0</min_connections>
+        <max_connections>1000</max_connections>
+        <max_idle_interval>900</max_idle_interval>
+      </default_pool>
+      <pools>
+        <pool username="${PINGMYSQL_USER}">
+          <min_connections>0</min_connections>
+          <max_connections>10</max_connections>
+          <max_idle_interval>180</max_idle_interval>
+        </pool>
+      </pools>
+    </pool_conf_ro>
+  </pool_conf>
+  <sql_rules>
+    <sql_single/>
+    <sql_template/>
+  </sql_rules>
+</dbproxy>
+EOF
+}
+postcheck_proxy_xml()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare -r _cnf="$PROXY_HOME/etc/mysql-proxy.xml"
+  if [ ! -f "$_cnf" ]; then
+    logger_error "mysql-proxy.xml not found: $_cnf"
+    return 1
+  fi
+  echo "cat /dbproxy/user_info/user[@name='$username']/password/text()" | \
+  xmllint --shell "$_cnf" | sed '/^\/ >/d'
+}
+
+write_zabbix_cnf()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare -r _cnf="$PROXY_HOME/etc/zabbix_agentd.cnf"
+  declare -r _cnf_bak="$PROXY_HOME/etc/zabbix_agentd.cnf.${TIMESTAMP}"
+
+  if [ -f "$_cnf" ]; then
+    if [[ "$OVERWRITE" = "Y" ]]; then
+      logger_info "backup zabbix cnf: $_cnf_bak"
+      cp -p "$_cnf" "$_cnf_bak"
+    else
+      logger_warn "zabbix cnf exists, OVERWRITE is forbidden: $_cnf"
+      return 0
+    fi
+  fi
+
+  logger_info "write zabbix cnf"
+  cat >$PROXY_HOME/etc/zabbix_agentd.cnf <<EOF
+## You might have to substitute the actual PATH in paramters below.
+PidFile=$PROXY_HOME/var/log/zabbix_agentd.pid
+LogFile=$PROXY_HOME/var/log/zabbix_agentd.log
+UserParameter=pxc.checkStatus[*],$PROXY_HOME/bin/pxc_check_status \$1 \$2 \$3 \$4
+##########
+## CAUTION: Following parameters should NOT be modified.
+Server=127.0.0.1
+ListenPort=10050
+ListenIP=127.0.0.1
+StartAgents=10
+Timeout=10
+UnsafeUserParameters=1
+## eof
+EOF
+}
+postcheck_zabbix_cnf()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare _cnf="$PROXY_HOME/etc/zabbix_agentd.cnf"
+  declare _k
+  declare -i _i=0
+
+  if [ ! -f "$PROXY_HOME/etc/zabbix_agentd.cnf" ]; then
+    logger_error "zabbix_agentd.cnf not found"
+    return 1
+  fi
+  _k=$(get_cnf_var "$_cnf" "PidFile")
+  if [ "$_k" != "$PROXY_HOME/var/log/zabbix_agentd.pid" ]; then
+    logger_error "PidFile invalid: $_k"
+    ((_i++))
+  fi
+  _k=$(get_cnf_var "$_cnf" "LogFile")
+  if [ "$_k" != "$PROXY_HOME/var/log/zabbix_agentd.log" ]; then
+    logger_error "LogFile invalid: $_k"
+    ((_i++))
+  fi
+  _k=$(get_cnf_var "$_cnf" "Server")
+  if [ "$_k" != "127.0.0.1" ]; then
+    logger_error "Server invalid: $_k"
+    ((_i++))
+  fi
+  _k=$(get_cnf_var "$_cnf" "ListenIP")
+  if [ "$_k" != "127.0.0.1" ]; then
+    logger_error "ListenIP invalid: $_k"
+    ((_i++))
+  fi
+  _k=$(get_cnf_var "$_cnf" "StartAgents")
+  if [ "$_k" -lt 10 ]; then
+    logger_error "StartAgents invalid: $_k"
+    ((_i++))
+  fi
+  _k=$(get_cnf_var "$_cnf" "Timeout")
+  if [ "$_k" -gt 10 ]; then
+    logger_error "Timeout invalid: $_k"
+    ((_i++))
+  fi
+  _k=$(get_cnf_var "$_cnf" "UnsafeUserParameters")
+  if [ "$_k" != "1" ]; then
+    logger_error "UnsafeUserParameters invalid: $_k"
+    ((_i++))
+  fi
+  _k=$(get_cnf_var "$_cnf" "UserParameter")
+  if [ "$_k" != "pxc.checkStatus[*],$PROXY_HOME/bin/pxc_check_status \$1 \$2 \$3 \$4" ]; then
+    logger_error "UserParameter invalid: $_k"
+    ((_i++))
+  fi
+  if ((_i!=0)); then
+    logger_error "check zabbix cnf error: $_cnf"
+  fi
+  return $_i
+}
+
+write_proxy_check()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare _src="$PROXY_HOME/bin/pxc_check_status.sample"
+  declare _cnf="$PROXY_HOME/bin/pxc_check_status"
+  declare _cnf_bak="$PROXY_HOME/bin/pxc_check_status.${TIMESTAMP}"
+
+  if [ -f "$_cnf" ]; then
+    if [[ "$OVERWRITE" = "Y" ]]; then
+      logger_info "backup proxy check: $_cnf_bak"
+      cp -p "$_cnf" "$_cnf_bak"
+    else
+      logger_warn "proxy check exists, OVERWRITE is forbidden: $_cnf"
+      return 0
+    fi
+  fi
+
+  logger_info "write proxy check"
+
+  if [ ! -f "$_src" ]; then
+    logger_error "proxy check sample not found: $_src"
+    return 1
+  fi
+
+  sed 's:$MYSQL_PROXY_HOME:'"$PROXY_HOME"':g' "$_src" >"$_cnf"
+}
+postcheck_proxy_check()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  if [ ! -f "$PROXY_HOME/bin/pxc_check_status" ]; then
+    logger_error "pxc_check_status not found: $PROXY_HOME/bin/pxc_check_status"
+    return 1
+  fi
+}
+
+
+set_var_keepalived_conf()
+{
+  if [ -z "$KEEPALIVED_PLACEHOLDER" ]; then
+    KEEPALIVED_VIP=${RW_ADDRESS_IP_ARRAY[0]}
+  else
+    KEEPALIVED_VIP=$KEEPALIVED_PLACEHOLDER
+  fi
+  if [ -z "$KEEPALIVED_VIP" ]; then
+    logger_error "vip is null"
+    return 1
+  fi
+  KEEPALIVED_ROUTEID=${KEEPALIVED_VIP##*.}
+}
+write_keepalived_conf()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare _cnf="/etc/keepalived/keepalived.conf"
+  declare _cnf_bak="/etc/keepalived/keepalived.conf.${TIMESTAMP}"
+  declare _i
+
+  set_var_keepalived_conf || return 1
+
+  if [ -f "$_cnf" ]; then
+    if [[ "$OVERWRITE" = "Y" ]]; then
+      logger_info "backup keepalived conf: $_cnf_bak"
+      cp -p "$_cnf" "$_cnf_bak"
+    else
+      logger_warn "keepalived conf exists, OVERWRITE is forbidden: $_cnf"
+      return 0
+    fi
+  fi
+
+  logger_debug "write keepalived conf"
+  > "$_cnf"
+
+  logger_debug "add header"
+  cat >>"$_cnf" <<EOF
+vrrp_script vs_dbproxy_${KEEPALIVED_ROUTEID} {
+    script "/etc/keepalived/dbproxy_notify.sh --state=check --vip=${KEEPALIVED_VIP} --mphome=$PROXY_HOME"
+    interval 10
+    rise 1
+    fall 3
+}
+
+vrrp_instance vi_dbproxy_${KEEPALIVED_ROUTEID} {
+    state BACKUP
+    nopreempt
+    interface em1
+    virtual_router_id ${KEEPALIVED_ROUTEID}
+    priority 100
+    advert_int ${KEEPALIVED_ROUTEID}
+    authentication {
+        auth_type PASS
+        auth_pass 1111${KEEPALIVED_ROUTEID}
+    }
+    track_script {
+       vs_dbproxy_${KEEPALIVED_ROUTEID}
+    }
+    notify_master "/etc/keepalived/dbproxy_notify.sh --state=master --vip=${KEEPALIVED_VIP} --mphome=$PROXY_HOME"
+    notify_backup "/etc/keepalived/dbproxy_notify.sh --state=backup --vip=${KEEPALIVED_VIP} --mphome=$PROXY_HOME"
+    notify_fault "/etc/keepalived/dbproxy_notify.sh --state=fault --vip=${KEEPALIVED_VIP} --mphome=$PROXY_HOME"
+    virtual_ipaddress {
+EOF
+
+  logger_debug "add vip"
+  cat >>"$_cnf" <<EOF
+        ${KEEPALIVED_VIP}
+EOF
+
+  logger_debug "add rw"
+  if [ -n "$KEEPALIVED_PLACEHOLDER" ]; then
+    _i=0
+  else
+    _i=1
+  fi
+  for ((;_i<${#RW_ADDRESS_IP_ARRAY[@]};_i++)); do
+    logger_debug "add rw ${RW_ADDRESS_IP_ARRAY[$_i]}"
+    cat >>"$_cnf" <<EOF
+        ${RW_ADDRESS_IP_ARRAY[$_i]}
+EOF
+  done
+
+  logger_debug "add ro"
+  for ((_i=0;_i<${#RO_ADDRESS_IP_ARRAY[@]};_i++)); do
+    logger_debug "add ro ${RO_ADDRESS_IP_ARRAY[$_i]}"
+    cat >>"$_cnf" <<EOF
+        ${RO_ADDRESS_IP_ARRAY[$_i]}
+EOF
+  done
+
+  logger_debug "add tailer"
+  cat >>"$_cnf" <<'EOF'
+    }
+}
+EOF
+}
+postcheck_keepalived_conf()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  if [ ! -f /etc/keepalived/keepalived.conf ]; then
+    logger_error "keepalived conf not found: /etc/keepalived/keepalived.conf"
+    return 1
+  fi
+}
+
+
+write_keepalived_haconf()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare _cnf="/etc/keepalived/haconf"
+  declare _cnf_bak="/etc/keepalived/haconf.${TIMESTAMP}"
+  declare _line
+
+  set_var_keepalived_conf || return 1
+
+  if [ -f "$_cnf" ]; then
+    if [[ "$OVERWRITE" = "Y" ]]; then
+      logger_info "backup keepalived haconf: $_cnf_bak"
+      cp -p "$_cnf" "$_cnf_bak"
+    else
+      logger_warn "keepalived haconf exists, OVERWRITE is forbidden: $_cnf"
+      return 0
+    fi
+  fi
+
+  logger_debug "write keepalived haconf"
+
+  declare _ips="${DATABASE_IP_ARRAY[@]}"
+  _ips=${_ips// /,}
+  _ips=${_ips##,}
+  _ips=${_ips%%,}
+
+  cat >"$_cnf" <<EOF
+N dbproxy /usr 3457 null ${_ips} N vi_dbproxy_${KEEPALIVED_ROUTEID} null null
+EOF
+}
+postcheck_keepalived_haconf()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare _cnf="/etc/keepalived/haconf"
+  if [ ! -f "$_cnf" ]; then
+    logger_error "keepalived haconf not found: $_cnf"
+    return 1
+  fi
+  return 0
+}
+
+
+get_proxy_admin_port()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare _proxy_cnf="$PROXY_HOME/etc/mysql-proxy.cnf"
+  declare _admin_addr
+  declare _admin_port
+  _admin_addr=$(get_cnf_var "$_proxy_cnf" "admin-address")
+  if (($?!=0)); then
+    logger_error "reading mysql-proxy.cnf error: $PROXY_HOME/etc/mysql-proxy.cnf"
+    return 1
+  fi
+  _admin_port=${_admin_addr#*:}
+  if [ -z "$_admin_addr" -o "$_admin_port" = "$_admin_addr" ]; then
+    logger_error "reading admin port error: $_admin_addr"
+    return 1
+  fi
+  PROXY_ADMIN_PORT=$_admin_port
+}
+write_proxytab()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare _cnf="/etc/proxytab"
+  declare _cnf_bak="/etc/proxytab.${TIMESTAMP}"
+
+  get_proxy_admin_port || return 1
+
+  if [ -f "$_cnf" ]; then
+    if [[ "$OVERWRITE" = "Y" ]]; then
+      logger_info "backup proxytab: $_cnf_bak"
+      cp -p "$_cnf" "$_cnf_bak"
+    else
+      logger_warn "proxytab exists, OVERWRITE is forbidden: $_cnf"
+      return 0
+    fi
+  fi
+
+  logger_debug "write proxytab"
+  cat >$_cnf <<EOF
+$MYSQL_HOME $PROXY_HOME $PROXY_ADMIN_PORT N
+EOF
+}
+postcheck_proxytab()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare _proxy_cnf="$PROXY_HOME/etc/mysql-proxy.cnf"
+  declare _cnf="/etc/proxytab"
+  declare -i _rc=0
+
+  if [ ! -f "$_cnf" ]; then
+    logger_error "proxytab not found: $_cnf"
+    return 1
+  fi
+  get_proxy_admin_port || return 1
+
+  declare _mh=$(sed '/^#/d;/^[[:space:]]$/d' "$_cnf" | awk '{print $1}')
+  declare _ph=$(sed '/^#/d;/^[[:space:]]$/d' "$_cnf" | awk '{print $2}')
+  declare _pcnf="${_ph}/etc/mysql-proxy.cnf"
+  declare _pap=$(sed '/^#/d;/^[[:space:]]$/d' "$_cnf" | awk '{print $3}')
+  declare _pstart=$(sed '/^#/d;/^[[:space:]]$/d' "$_cnf" | awk '{print $4}')
+  if [[ "$_mh" != "$MYSQL_HOME" ]]; then
+    logger_error "mysql_home not right in proxytab. expected: $MYSQL_HOME, actual: $_mh"
+    ((_rc++))
+  fi
+  if [[ "$_ph" != "$PROXY_HOME" ]]; then
+    logger_error "proxy_home not right in proxytab. expected: $PROXY_HOME, actual: $_ph"
+    ((_rc++))
+  fi
+  if [[ "$_pcnf" != "$_proxy_cnf" ]]; then
+    logger_error "mysql-proxy.cnf not right in proxytab. expected: $_proxy_cnf, actual: $_pcnf"
+    ((_rc++))
+  fi
+  if [[ "$_pap" != "$PROXY_ADMIN_PORT" ]]; then
+    logger_error "admin port not right in proxytab. expected: $PROXY_ADMIN_PORT, actual: $_pap"
+    ((_rc++))
+  fi
+  if [[ "$_pstart" != "Y" && "$_pstart" != "N" ]]; then
+    logger_error "autostart not right in proxytab. expected: Y|N, actual: $_pstart"
+    ((_rc++))
+  fi
+  return $_rc
+}
+
+##### config
+
+config_os_privilege()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  if [ -z "$PROXY_HOME" ]; then
+    logger_error "PROXY_HOME not specified"
+    return 1
+  fi
+  if [ -f "$PROXY_HOME/etc/zabbix_agentd.cnf" ]; then
+    chown zabbix:zabbix "$PROXY_HOME/etc/zabbix_agentd.cnf"
+  fi
+  if [ -f "$PROXY_HOME/bin/pxc_check_status" ]; then
+    chmod 0755 "$PROXY_HOME/bin/pxc_check_status"
+    chown zabbix:zabbix "$PROXY_HOME/bin/pxc_check_status"
+  fi
+  if [ -f "$PROXY_HOME/bin/mysql_check_status" ]; then
+    chmod 0755 "$PROXY_HOME/bin/mysql_check_status"
+    chown zabbix:zabbix "$PROXY_HOME/bin/mysql_check_status"
+  fi
+  if [ -d "$PROXY_HOME/var" ]; then
+    chown -R zabbix:zabbix "$PROXY_HOME/var"
+  fi
+  if [ -f "$PROXY_HOME/etc/mysql-proxy.xml" ]; then
+    chmod 0660 "$PROXY_HOME/etc/mysql-proxy.xml"
+  fi
+  if [ -f "$PROXY_HOME/etc/mysql-proxy.cnf" ]; then
+    chmod 0660 "$PROXY_HOME/etc/mysql-proxy.cnf"
+  fi
+}
+
+config_database()
+{
+  logger_debug "${FUNCNAME[0]}()..."
+  declare _ip0
+  declare _port0
+  declare -i _i=0
+  declare _ip
+  declare _port
+  declare _sql=""
+  logger_info "config database"
+  if [ ${#DATABASE_ARRAY[@]} -eq 0 ]; then
+    return 0
+  fi
+  _ip0=${DATABASE_IP_ARRAY[0]}
+  _port0=${DATABASE_PORT_ARRAY[0]}
+  for ((_i=0; _i<${#DATABASE_ARRAY[@]}; _i++)); do
+    _ip=${DATABASE_IP_ARRAY[$_i]}
+    _port=${DATABASE_PORT_ARRAY[$_i]}
+    _sql="$_sql
+GRANT USAGE ON *.* TO '$PINGMYSQL_USER'@'$_ip' IDENTIFIED BY '$PINGMYSQL_PWD' WITH MAX_USER_CONNECTIONS 20;
+GRANT SELECT, INSERT, UPDATE, DELETE ON mysql_identity.heartbeat TO '$PINGMYSQL_USER'@'$_ip';
+grant usage on *.* to '$PROXY_USER'@'$_ip' identified by '$PROXY_PWD';
+"
+  done
+  logger_debug "_ip0=$_ip0 _port0=$_port0"
+  logger_debug "_sql=$_sql"
+  $SSH -T ${_ip0} <<EOF
+$MYSQL_CLIENT -h127.0.0.1 -P${_port0} -u root -ABs <<'EEE'
+$_sql
+EEE
+EOF
+  if (($?!=0)); then
+    logger_error "add db account error: pingmysql, proxy"
+    return 1
+  fi
+}
+
+
+
+##### functional modules
+get_check_item_desc()
+{
+  declare -r _n=$1
+  declare -a check_item=(
+  "start" "begin"
+  "os_release" "OS Release"
+  "os_arch" "OS Arch"
+  "core_file_size" "Sysconf: Max Core File Size"
+  "open_files" "Sysconf: Max Open Files"
+  "file_max" "Sysconf: File Max"
+  "ip_nonlocal_bind" "Sysconf: IP nonlocal bind"
+  "libxml2" "Libxml2 Library"
+  "rsync" "Rsync Clint"
+  "mysql_client" "MySQL Client"
+  "proxy_base" "Proxy Base"
+  "cpu_count" "Numbers of CPU"
+  "free_memory" "Free Memory"
+  "free_disk" "Free Disk Space of PROXY_BASE"
+  "proxy_tar" "Proxy Installation Package"
+  "proxy_home" "Proxy home"
+  "ssh" "SSH Connectivity"
+  "database" "Database Connectivity"
+  "keepalived" "Keepalived Software"
+  "keepalived_script" "Keepalived Check Script"
+  "keepalived_script_tar" "Keepalived Check Script Package"
+  "db_charset" "DB character Set"
+  "character_set_b4" "DBProxy Character Set before installation"
+  "character_set" "DBProxy Character Set"
+  "os_account" "OS Account"
+  "proxy_install" "Proxy Installation"
+  "proxy_cnf" "DBProxy Cnf"
+  "proxy_xml" "DBProxy Xml"
+  "zabbix_cnf" "Zabbix Config"
+  "proxy_check" "DB Check Scripts"
+  "keepalived_conf" "Keepalived Conf"
+  "keepalived_haconf" "Keepalived Haconf"
+  "proxytab" "Proxytab"
+  "config_os_privilege" "Config OS Privilege"
+  "finish" "end"
+  )
+  declare -i i=0
+  for ((i=0; i<${#check_item[@]}; i+=2)); do
+    if [[ "${check_item[$i]}" == "$_n" ]]; then
+      echo "${check_item[$((i+1))]}"
+      return 0
+    fi
+  done
+  echo "unknown"
+  return 1
+}
+
+get1()
+{
+  declare -r _n=$1
+  declare _f
+  shift
+  if [[ "$MOCK" = "Y" ]]; then
+    _f=get_${_n}_mock
+  else
+    _f=get_${_n}
+  fi
+  if declare -F ${_f} >/dev/null; then
+    ${_f} "$@"
+  else
+    logger_debug "function not defined: ${_f}"
+  fi
+}
+
+precheck1()
+{
+  declare -r _n=$1
+  declare _s
+  declare _chk_f
+  if declare -F check_${_n} >/dev/null; then
+    logger_debug "check function found: check_${_n}"
+    _chk_f=check_${_n}
+  elif declare -F precheck_${_n} >/dev/null; then
+    logger_debug "precheck function found: check_${_n}"
+    _chk_f=precheck_${_n}
+  else
+    logger_error "check/precheck function not found: ${_n}"
+    return 1
+  fi
+  _s=$(get_check_item_desc "$_n")
+  print_check_header "$_s"
+  get1 ${_n}
+  ${_chk_f}
+  print_check_result
+}
+postcheck1()
+{
+  declare -r _n=$1
+  declare _s=""
+  declare _chk_f
+  if declare -F check_${_n} >/dev/null; then
+    logger_debug "check function found: check_${_n}"
+    _get_f=get_${_n}
+    _chk_f=check_${_n}
+  elif declare -F postcheck_${_n} >/dev/null; then
+    logger_debug "postcheck function found: check_${_n}"
+    _chk_f=postcheck_${_n}
+  else
+    logger_error "check/postcheck function not found: ${_n}"
+    return 1
+  fi
+  _s=$(get_check_item_desc "$_n")
+  print_check_header "$_s"
+  get1 ${_n}
+  ${_chk_f}
+  print_check_result
+}
+
+print_check_begin()
+{
+  _CHECK_COUNT=0
+  _CHECK_ERROR_COUNT=0
+  _CHECK_ERROR_NUMBER=""
+  _CHECK_ITEM=""
+}
+print_check_header()
+{
+  _CHECK_ITEM=$1
+  ((_CHECK_COUNT++))
+  logger_info "Checking ($_CHECK_COUNT) $_CHECK_ITEM ... "
+}
+print_check_result()
+{
+  declare -i _rc=${1:-$?}
+  if (($_rc==0)); then
+    logger_info "Checking $_CHECK_ITEM ... done"
+    return 0
+  else
+    logger_error "Checking $_CHECK_ITEM ... failed"
+    ((_CHECK_ERROR_COUNT++))
+    _CHECK_ERROR_NUMBER="$_CHECK_ERROR_NUMBER $_CHECK_COUNT"
+    return 1
+  fi
+}
+print_check_end()
+{
+  if ((_CHECK_ERROR_COUNT>0)); then
+    logger_error "check failed (${_CHECK_ERROR_COUNT}/${_CHECK_COUNT})"
+    logger_error "failed#: $_CHECK_ERROR_NUMBER"
+  else
+    logger_info "check done (${_CHECK_ERROR_COUNT}/${_CHECK_COUNT})"
+  fi
+  return $_CHECK_ERROR_COUNT
+}
+##
+# Check
+# @return numbers of failed check
+do_checks()
+{
+  declare -r _cn=$1
+  declare -i _rc=0
+  declare -i _i=0
+  declare -r _f=${_cn}1
+  declare -r _ar="${_cn}[@]"
+  declare -ar _checks=( "${!_ar}" )
+
+  logger_info "check $_cn"
+  print_check_begin
+
+  for ((_i=0; _i<${#_checks[@]}; _i++)); do
+    $_f ${_checks[$_i]}
+  done
+
+  print_check_end
+  _rc=$?
+  if ((_rc != 0)); then
+    if [ "$FORCE" = "Y" ]; then
+      logger_warn "FORCE is Y, failed $_cn ignored"
+      _rc=0
+    fi
+  fi
+  return $_rc
+}
+
+confirm()
+{
+  declare _reply="N"
+  read -p "CAUTION: Your configuration files will be OVERWRITTEN, continue? (Yes/No)" _reply
+  if [[ "$_reply" == "Yes" ]]; then
+    return 0
+  else
+    logger_info "Operation Cancelled."
+    return 1
+  fi
+}
+
+
+precheck()
+{
+  declare -ar precheck=(
+    os_release
+    os_arch
+    cpu_count
+    free_memory
+    free_disk
+    core_file_size
+    open_files
+    file_max
+    ip_nonlocal_bind
+    libxml2
+    rsync
+    mysql_client
+    proxy_base
+    proxy_tar
+    proxy_home
+    keepalived
+    keepalived_script
+    keepalived_script_tar
+    ssh
+    database
+    db_charset
+    character_set_b4
+  )
+  logger_info "check prerequisites"
+  do_checks precheck
+  return $?
+}
+postcheck()
+{
+  declare -ar postcheck=(
+    os_release
+    os_arch
+    cpu_count
+    free_memory
+    free_disk
+    core_file_size
+    open_files
+    file_max
+    ip_nonlocal_bind
+    libxml2
+    rsync
+    mysql_client
+    proxy_base
+    proxy_home
+    ssh
+    database
+    keepalived
+    keepalived_script
+    db_charset
+    character_set
+    os_account
+    proxy_install
+    proxy_cnf
+    proxy_xml
+    zabbix_cnf
+    proxy_check
+    keepalived_conf
+    keepalived_haconf
+    proxytab
+    config_os_privilege
+  )
+  logger_info "post check"
+  do_checks postcheck
+  return $?
+}
+
+install()
+{
+  precheck && \
+  install_os_account && \
+  install_proxy_tar && \
+  install_proxy_path && \
+  install_keepalived_script
+}
+write_config()
+{
+  postcheck && \
+  write_proxy_cnf && \
+  write_proxy_xml && \
+  write_zabbix_cnf && \
+  write_proxy_check && \
+  write_keepalived_conf && \
+  write_keepalived_haconf && \
+  write_proxytab
+}
+config()
+{
+  postcheck && \
+  install_os_account && \
+  install_proxy_path && \
+  config_os_privilege && \
+  config_database
+}
+all()
+{
+  precheck && \
+  install_os_account && \
+  install_proxy_tar && \
+  install_proxy_path && \
+  install_keepalived_script && \
+  write_proxy_cnf && \
+  write_proxy_xml && \
+  write_zabbix_cnf && \
+  write_proxy_check && \
+  write_keepalived_conf && \
+  write_keepalived_haconf && \
+  write_proxytab && \
+  config_os_privilege && \
+  config_database && \
+  postcheck
+}
+
+
+
+
+##### unit tests
+test_assert()
+{
+  assert 0 -eq 0
+  assert 0 -le 0
+  assert 0 -ge 0
+  assert 0 -ne 1
+  assert 0 -lt 1
+  assert 0 -le 1
+  assert 1 -gt 0
+  assert 1 -ge 0
+  assert "a" = "a"
+  assert "a" != "b"
+}
+test_compare_version()
+{
+  compare_version "2" "2"
+  assert $? -eq 0
+  compare_version "2.5" "2.5"
+  assert $? -eq 0
+  compare_version "2.5.5" "2.5.5"
+  assert $? -eq 0
+  compare_version "2.5.5" "2.5.6"
+  assert $? -eq 1
+  compare_version "2.5.5" "2.5.1"
+  assert $? -eq 2
+  compare_version "2" "2.5"
+  assert $? -eq 1
+  compare_version "2.5" "2.5.0"
+  assert $? -eq 1
+  compare_version "2.5.0" "2.5"
+  assert $? -eq 2
+  compare_version "2.5" "3"
+  assert $? -eq 1
+  compare_version "2.0" "3"
+  assert $? -eq 1
+  compare_version "3" "2.5"
+  assert $? -eq 2
+  compare_version "3" "2.0"
+  assert $? -eq 2
+}
+test_compare_version2()
+{
+  compare_version2 5.1 -eq 5.1
+  assert $? -eq 0
+  compare_version2 5.1 -ne 5.1
+  assert $? -eq 1
+  compare_version2 5.1 -gt 5.1
+  assert $? -eq 1
+  compare_version2 5.1 -ge 5.1
+  assert $? -eq 0
+  compare_version2 5.1 -lt 5.1
+  assert $? -eq 1
+  compare_version2 5.1 -le 5.1
+  assert $? -eq 0
+}
+
+
+test_get_xml_var()
+{
+  declare _f="/tmp/dbproxy_get_var_tmp"
+  declare _v=""
+
+  cat >$_f <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<root_node version="1.0">
+  <child_node_1>
+    <string_node>on</string_node>
+    <int_node>2</int_node>
+    <two_spaces_node>  </two_spaces_node>
+    <empty_node></empty_node>
+    <empty_node2/>
+    <!--<non_existent_node></non_existent_node>-->
+  </child_node_1>
+  <child_node_2 attr1="value1" attr2="value2">
+    <node>unknown</node>
+  </child_node_2>
+</root_node>
+EOF
+
+  get_xml_var "$_f" ""
+  assert $? -ne 0
+  get_xml_var "nosuchfile" ""
+  assert $? -ne 0
+
+  _v=$(get_xml_var "$_f" "/root_node[@version='1.0']/child_node_1/string_node/text()")
+  assert $? -eq 0
+  assert "$_v" = "on"
+
+  _v=$(get_xml_var "$_f" "/root_node/child_node_1/string_node/text()")
+  assert $? -eq 0
+  assert "$_v" = "on"
+  _v=$(get_xml_var "$_f" "/root_node/child_node_1/int_node/text()")
+  assert $? -eq 0
+  assert "$_v" = "2"
+  _v=$(get_xml_var "$_f" "/root_node/child_node_1/two_spaces_node/text()")
+  assert $? -eq 0
+  assert "$_v" = "  "
+  _v=$(get_xml_var "$_f" "/root_node/child_node_1/empty_node/text()")
+  assert $? -eq 0
+  assert "$_v" = ""
+  _v=$(get_xml_var "$_f" "/root_node/child_node_1/empty_node2/text()")
+  assert $? -eq 0
+  assert "$_v" = ""
+
+  _v=$(get_xml_var "$_f" "/root_node/child_node_1/non_existent_node/text()")
+  assert $? -eq 2
+  assert "$_v" = ""
+
+  _v=$(get_xml_var "$_f" "/root_node/child_node_1/non_existent_node/textaaaa()")
+  assert $? -eq 1
+  assert "$_v" = ""
+
+  rm -f "$_f"
+  return 0
+}
+
+test_get_cnf_var()
+{
+  declare _f="/tmp/dbproxy_get_var_tmp"
+  declare _v=""
+
+  cat >"$_f" <<'EOF'
+[section1]
+key1=value11
+key2=value12
+[section2]
+key1=value21
+key3=value23
+[section3]
+key1=value31
+key1=value32
+key1=value33
+key1=value34
+key3=value33
+EOF
+
+  _v=$( get_cnf_var "$_f" "" )
+  assert $? -ne 0
+  _v=$( get_cnf_var "nosuchfile" "key" )
+  assert $? -ne 0
+
+  _v=$( get_cnf_var "$_f" "key1" "section1" )
+  assert $? -eq 0
+  assert "$_v" = "value11"
+  _v=$( get_cnf_var "$_f" "key2" "section1" )
+  assert $? -eq 0
+  assert "$_v" = "value12"
+
+  _v=$( get_cnf_var "$_f" "key1" "section2" )
+  assert $? -eq 0
+  assert "$_v" = "value21"
+  _v=$( get_cnf_var "$_f" "key3" "section2" )
+  assert $? -eq 0
+  assert "$_v" = "value23"
+
+  _v=$( get_cnf_var "$_f" "key3" "section3" )
+  assert $? -eq 0
+  assert "$_v" = "value33"
+  _v=$( get_cnf_var "$_f" "key1" "section3" )
+  assert $? -eq 3
+
+  _v=$( get_cnf_var "$_f" "key9999" "section1" )
+  assert $? -eq 2
+  _v=$( get_cnf_var "$_f" "key3" "" )
+  assert $? -eq 3
+  _v=$( get_cnf_var "$_f" "key1" "section9999" )
+  assert $? -eq 4
+  _v=$( get_cnf_var "$_f" "key1" "" )
+  assert $? -eq 3
+
+  rm -f "$_f"
+  return 0
+}
+
+
+test_check_os_release()
+{
+  get_os_release_mock ""
+  check_os_release
+  assert $? -eq 1
+
+  get_os_release_mock "5.1"
+  check_os_release
+  assert $? -eq 2
+
+  get_os_release_mock "5.7"
+  check_os_release
+  assert $? -eq 0
+
+  get_os_release_mock "5.9"
+  check_os_release
+  assert $? -eq 0
+
+  get_os_release_mock "6.2"
+  check_os_release
+  assert $? -eq 3
+
+  get_os_release_mock "6.3"
+  check_os_release
+  assert $? -eq 0
+
+  get_os_release_mock "6.4"
+  check_os_release
+  assert $? -eq 0
+
+  get_os_release_mock "4.5"
+  check_os_release
+  assert $? -eq 4
+}
+test_check_os_arch()
+{
+  get_os_arch_mock "x86_64"
+  check_os_arch
+  assert $? -eq 0
+  get_os_arch_mock "i686"
+  check_os_arch
+  assert $? -eq 1
+}
+test_check_core_file_size()
+{
+  declare _f="/tmp/dbproxy_instal_mock"
+  >$_f
+
+  get_core_file_size_mock "0" "$_f"
+  check_core_file_size
+  assert $? -eq 1
+
+  get_core_file_size_mock "unlimited" "$_f"
+  check_core_file_size
+  assert $? -eq 1
+
+  get_core_file_size_mock "unlimited" "$_f"
+  fix_core_file_size
+  check_core_file_size
+  assert $? -eq 0
+
+  get_core_file_size_mock "unlimited" "$_f"
+  echo "* soft core 123" >$_f
+  check_core_file_size
+  assert $? -eq 1
+  fix_core_file_size
+  check_core_file_size
+  assert $? -eq 0
+
+  rm -f "$_f"
+}
+test_check_open_files()
+{
+  declare _f="/tmp/dbproxy_instal_mock"
+  >$_f
+
+  get_open_files_mock "123" "$_f"
+  check_open_files
+  assert $? -eq 1
+
+  get_open_files_mock "131072" "$_f"
+  check_open_files
+  assert $? -eq 1
+
+  get_open_files_mock "131072" "$_f"
+  fix_open_files
+  check_open_files
+  assert $? -eq 0
+
+  get_open_files_mock "131072" "$_f"
+  echo "* soft nofile 123" >$_f
+  check_open_files
+  assert $? -eq 1
+  fix_open_files
+  check_open_files
+  assert $? -eq 0
+
+  rm -f "$_f"
+}
+test_check_file_max()
+{
+  declare _f="/tmp/dbproxy_instal_mock"
+  >$_f
+
+  get_file_max_mock "123" "$_f"
+  check_file_max
+  assert $? -eq 1
+
+  get_file_max_mock "6815744" "$_f"
+  check_file_max
+  assert $? -eq 1
+
+  get_file_max_mock "6815744" "$_f"
+  fix_file_max
+  check_file_max
+  assert $? -eq 0
+
+  get_file_max_mock "6815744" "$_f"
+  echo "fs.file-max = 6815743" >$_f
+  check_file_max
+  assert $? -eq 1
+  fix_file_max
+  check_file_max
+  assert $? -eq 0
+
+  rm -f "$_f"
+}
+test_check_ip_nonlocal_bind()
+{
+  declare _f="/tmp/dbproxy_instal_mock"
+  >$_f
+
+  get_ip_nonlocal_bind_mock "0" "$_f"
+  check_ip_nonlocal_bind
+  assert $? -eq 1
+
+  get_ip_nonlocal_bind_mock "1" "$_f"
+  check_ip_nonlocal_bind
+  assert $? -eq 1
+
+  get_ip_nonlocal_bind_mock "1" "$_f"
+  fix_ip_nonlocal_bind
+  check_ip_nonlocal_bind
+  assert $? -eq 0
+
+  get_ip_nonlocal_bind_mock "1" "$_f"
+  echo "net.ipv4.ip_nonlocal_bind = 0" >$_f
+  check_ip_nonlocal_bind
+  assert $? -eq 1
+  fix_ip_nonlocal_bind
+  check_ip_nonlocal_bind
+  assert $? -eq 0
+
+  rm -f "$_f"
+}
+test_check_libxml2()
+{
+  get_libxml2_mock ""
+  check_libxml2
+  assert $? -eq 1
+  get_libxml2_mock "2.5"
+  check_libxml2
+  assert $? -eq 1
+  get_libxml2_mock "2.6"
+  check_libxml2
+  assert $? -eq 0
+  get_libxml2_mock "2.6.26"
+  check_libxml2
+  assert $? -eq 0
+  get_libxml2_mock "2.7.6"
+  check_libxml2
+  assert $? -eq 0
+}
+test_check_rsync()
+{
+  get_rsync_mock ""
+  check_rsync
+  assert $? -eq 1
+  get_rsync_mock "2.5"
+  check_rsync
+  assert $? -eq 1
+  get_rsync_mock "3.0"
+  check_rsync
+  assert $? -eq 0
+  get_rsync_mock "3.0.6"
+  check_rsync
+  assert $? -eq 0
+}
+test_check_mysql_client()
+{
+  get_mysql_client_mock "/bin/nosuchfile"
+  check_mysql_client
+  assert $? -eq 1
+  get_mysql_client_mock "/bin/true" "5.0"
+  check_mysql_client
+  assert $? -eq 1
+  get_mysql_client_mock "/bin/true" "5.1.22"
+  check_mysql_client
+  assert $? -eq 0
+  get_mysql_client_mock "/bin/true" "5.5.23"
+  check_mysql_client
+  assert $? -eq 0
+}
+test_check_proxy_tar()
+{
+  get_proxy_tar_mock "$DBA_DELIVERY/0.8.1.4/mysql-proxy-0.8.1-bin.el6.tar.gz"
+  precheck_proxy_tar
+  assert $? -eq 0
+  get_proxy_tar_mock "/bin/true"
+  precheck_proxy_tar
+  assert $? -eq 0
+  get_proxy_tar_mock "$DBA_DELIVERY/0.8.1.100/mysql-proxy-0.8.1-bin.el6.tar.gz"
+  precheck_proxy_tar
+  assert $? -eq 1
+  get_proxy_tar_mock "$DBA_DELIVERY/0.8.1.4/mysql-proxy-0.8.2-bin.el6.tar.gz"
+  precheck_proxy_tar
+  assert $? -eq 1
+}
+test_check_proxy_home()
+{
+  declare -r _dir="/tmp/dbproxy_install_proxy_home"
+  declare -r _file="$_dir/testfile"
+  get_proxy_home_mock ""
+  precheck_proxy_home
+  assert $? -eq 1
+  postcheck_proxy_home
+  assert $? -eq 1
+
+  [ -f $_file ] && rm -f $_file
+  [ -d $_dir ] && rmdir $_dir
+  mkdir -p $_dir
+  get_proxy_home_mock "$_dir"
+  precheck_proxy_home
+  assert $? -eq 0
+  postcheck_proxy_home
+  assert $? -eq 1
+
+  touch $_file
+  precheck_proxy_home
+  assert $? -eq 1
+  rm -f $_file
+  rmdir $_dir
+}
+test_check_proxy_base()
+{
+  declare -r _dir="/tmp/nosuchdir/aaa"
+  get_proxy_base_mock "$_dir"
+  check_proxy_base
+  assert $? -eq 1
+  mkdir -p "$_dir"
+  check_proxy_base
+  assert $? -eq 0
+  rmdir "$_dir"
+  check_proxy_base
+  assert $? -eq 1
+}
+
+test_database_csv_to_array()
+{
+  get_database_csv_mock "1.0.0.1:3306"
+  database_csv_to_array
+  assert $? -eq 1
+  assert "${#DATABASE_ARRAY[@]}" -eq 1
+  assert "${#DATABASE_IP_ARRAY[@]}" -eq 1
+  assert "${#DATABASE_PORT_ARRAY[@]}" -eq 1
+  assert "${DATABASE_ARRAY[0]}" = "1.0.0.1:3306"
+  assert "${DATABASE_IP_ARRAY[0]}" = "1.0.0.1"
+  assert "${DATABASE_PORT_ARRAY[0]}" = "3306"
+
+  get_database_csv_mock "1.0.0.2:3307"
+  database_csv_to_array
+  assert $? -eq 1
+  assert "${#DATABASE_ARRAY[@]}" -eq 1
+  assert "${#DATABASE_IP_ARRAY[@]}" -eq 1
+  assert "${#DATABASE_PORT_ARRAY[@]}" -eq 1
+  assert "${DATABASE_ARRAY[0]}" = "1.0.0.2:3307"
+  assert "${DATABASE_IP_ARRAY[0]}" = "1.0.0.2"
+  assert "${DATABASE_PORT_ARRAY[0]}" = "3307"
+
+  get_database_csv_mock "1.0.0.3"
+  database_csv_to_array
+  assert $? -eq 1
+  assert "${#DATABASE_ARRAY[@]}" -eq 1
+  assert "${#DATABASE_IP_ARRAY[@]}" -eq 1
+  assert "${#DATABASE_PORT_ARRAY[@]}" -eq 1
+  assert "${DATABASE_ARRAY[0]}" = "1.0.0.3"
+  assert "${DATABASE_IP_ARRAY[0]}" = "1.0.0.3"
+  assert "${DATABASE_PORT_ARRAY[0]}" = "3306"
+
+  get_database_csv_mock "1.0.0.4:3306,1.0.0.5,1.0.0.6:3307"
+  database_csv_to_array
+  assert $? -eq 3
+  assert "${#DATABASE_ARRAY[@]}" -eq 3
+  assert "${#DATABASE_IP_ARRAY[@]}" -eq 3
+  assert "${#DATABASE_PORT_ARRAY[@]}" -eq 3
+  assert "${DATABASE_ARRAY[0]}" = "1.0.0.4:3306"
+  assert "${DATABASE_IP_ARRAY[0]}" = "1.0.0.4"
+  assert "${DATABASE_PORT_ARRAY[0]}" = "3306"
+  assert "${DATABASE_ARRAY[1]}" = "1.0.0.5"
+  assert "${DATABASE_IP_ARRAY[1]}" = "1.0.0.5"
+  assert "${DATABASE_PORT_ARRAY[1]}" = "3306"
+  assert "${DATABASE_ARRAY[2]}" = "1.0.0.6:3307"
+  assert "${DATABASE_IP_ARRAY[2]}" = "1.0.0.6"
+  assert "${DATABASE_PORT_ARRAY[2]}" = "3307"
+}
+
+
+test_rw_address_csv_to_array()
+{
+  get_rw_address_csv_mock "1.0.0.1:3306"
+  rw_address_csv_to_array
+  assert $? -eq 1
+  assert "${#RW_ADDRESS_ARRAY[@]}" -eq 1
+  assert "${#RW_ADDRESS_IP_ARRAY[@]}" -eq 1
+  assert "${#RW_ADDRESS_PORT_ARRAY[@]}" -eq 1
+  assert "${RW_ADDRESS_ARRAY[0]}" = "1.0.0.1:3306"
+  assert "${RW_ADDRESS_IP_ARRAY[0]}" = "1.0.0.1"
+  assert "${RW_ADDRESS_PORT_ARRAY[0]}" = "3306"
+
+  get_rw_address_csv_mock "1.0.0.2:3307"
+  rw_address_csv_to_array
+  assert $? -eq 1
+  assert "${#RW_ADDRESS_ARRAY[@]}" -eq 1
+  assert "${#RW_ADDRESS_IP_ARRAY[@]}" -eq 1
+  assert "${#RW_ADDRESS_PORT_ARRAY[@]}" -eq 1
+  assert "${RW_ADDRESS_ARRAY[0]}" = "1.0.0.2:3307"
+  assert "${RW_ADDRESS_IP_ARRAY[0]}" = "1.0.0.2"
+  assert "${RW_ADDRESS_PORT_ARRAY[0]}" = "3307"
+
+  get_rw_address_csv_mock "1.0.0.3"
+  rw_address_csv_to_array
+  assert $? -eq 1
+  assert "${#RW_ADDRESS_ARRAY[@]}" -eq 1
+  assert "${#RW_ADDRESS_IP_ARRAY[@]}" -eq 1
+  assert "${#RW_ADDRESS_PORT_ARRAY[@]}" -eq 1
+  assert "${RW_ADDRESS_ARRAY[0]}" = "1.0.0.3"
+  assert "${RW_ADDRESS_IP_ARRAY[0]}" = "1.0.0.3"
+  assert "${RW_ADDRESS_PORT_ARRAY[0]}" = "3306"
+
+  get_rw_address_csv_mock "1.0.0.4:3306,1.0.0.5,1.0.0.6:3307"
+  rw_address_csv_to_array
+  assert $? -eq 3
+  assert "${#RW_ADDRESS_ARRAY[@]}" -eq 3
+  assert "${#RW_ADDRESS_IP_ARRAY[@]}" -eq 3
+  assert "${#RW_ADDRESS_PORT_ARRAY[@]}" -eq 3
+  assert "${RW_ADDRESS_ARRAY[0]}" = "1.0.0.4:3306"
+  assert "${RW_ADDRESS_IP_ARRAY[0]}" = "1.0.0.4"
+  assert "${RW_ADDRESS_PORT_ARRAY[0]}" = "3306"
+  assert "${RW_ADDRESS_ARRAY[1]}" = "1.0.0.5"
+  assert "${RW_ADDRESS_IP_ARRAY[1]}" = "1.0.0.5"
+  assert "${RW_ADDRESS_PORT_ARRAY[1]}" = "3306"
+  assert "${RW_ADDRESS_ARRAY[2]}" = "1.0.0.6:3307"
+  assert "${RW_ADDRESS_IP_ARRAY[2]}" = "1.0.0.6"
+  assert "${RW_ADDRESS_PORT_ARRAY[2]}" = "3307"
+}
+
+
+test_csv_to_array()
+{
+  TEST_CSV="1.0.0.1:3306"
+  csv_to_array TEST
+  assert $? -eq 1
+  assert "${#TEST_ARRAY[@]}" -eq 1
+  assert "${#TEST_IP_ARRAY[@]}" -eq 1
+  assert "${#TEST_PORT_ARRAY[@]}" -eq 1
+  assert "${TEST_ARRAY[0]}" = "1.0.0.1:3306"
+  assert "${TEST_IP_ARRAY[0]}" = "1.0.0.1"
+  assert "${TEST_PORT_ARRAY[0]}" = "3306"
+
+  TEST_CSV="1.0.0.2:3307"
+  csv_to_array TEST
+  assert $? -eq 1
+  assert "${#TEST_ARRAY[@]}" -eq 1
+  assert "${#TEST_IP_ARRAY[@]}" -eq 1
+  assert "${#TEST_PORT_ARRAY[@]}" -eq 1
+  assert "${TEST_ARRAY[0]}" = "1.0.0.2:3307"
+  assert "${TEST_IP_ARRAY[0]}" = "1.0.0.2"
+  assert "${TEST_PORT_ARRAY[0]}" = "3307"
+
+  TEST_CSV="1.0.0.3"
+  csv_to_array TEST
+  assert $? -eq 1
+  assert "${#TEST_ARRAY[@]}" -eq 1
+  assert "${#TEST_IP_ARRAY[@]}" -eq 1
+  assert "${#TEST_PORT_ARRAY[@]}" -eq 1
+  assert "${TEST_ARRAY[0]}" = "1.0.0.3"
+  assert "${TEST_IP_ARRAY[0]}" = "1.0.0.3"
+  assert "${TEST_PORT_ARRAY[0]}" = "3306"
+
+  TEST_CSV="1.0.0.4:3306,1.0.0.5,1.0.0.6:3307"
+  csv_to_array TEST
+  assert $? -eq 3
+  assert "${#TEST_ARRAY[@]}" -eq 3
+  assert "${#TEST_IP_ARRAY[@]}" -eq 3
+  assert "${#TEST_PORT_ARRAY[@]}" -eq 3
+  assert "${TEST_ARRAY[0]}" = "1.0.0.4:3306"
+  assert "${TEST_IP_ARRAY[0]}" = "1.0.0.4"
+  assert "${TEST_PORT_ARRAY[0]}" = "3306"
+  assert "${TEST_ARRAY[1]}" = "1.0.0.5"
+  assert "${TEST_IP_ARRAY[1]}" = "1.0.0.5"
+  assert "${TEST_PORT_ARRAY[1]}" = "3306"
+  assert "${TEST_ARRAY[2]}" = "1.0.0.6:3307"
+  assert "${TEST_IP_ARRAY[2]}" = "1.0.0.6"
+  assert "${TEST_PORT_ARRAY[2]}" = "3307"
+
+  unset TEST_CSV
+  unset TEST_ARRAY
+  unset TEST_IP_ARRAY
+  unset TEST_PORT_ARRAY
+}
+
+
+test_check_keepalived()
+{
+  declare -r _dir="/tmp/nosuchdir/tck"
+  get_keepalived_mock "true" "v1.2.7" "/tmp"
+  check_keepalived
+  assert $? -eq 0
+  get_keepalived_mock "/nosuchfile" "v1.2.7" "/tmp"
+  check_keepalived
+  assert $? -eq 1
+  get_keepalived_mock "true" "v1.2.4" "/tmp"
+  check_keepalived
+  assert $? -eq 1
+  get_keepalived_mock "true" "v1.2.7" "$_dir"
+  check_keepalived
+  assert $? -eq 1
+  mkdir -p "$_dir"
+  check_keepalived
+  assert $? -eq 0
+  rmdir "$_dir"
+}
+
+
+test_check_keepalived_script_tar()
+{
+  declare _tmp="/tmp/dbproxy_install_keepalived_script_src"
+  get_keepalived_script_tar_mock "$DBA_DELIVERY/0.8.1.4/dbproxy_notify.sh" 1.0.7
+  precheck_keepalived_script_tar
+  assert $? -eq 0
+  get_keepalived_script_tar_mock "$DBA_DELIVERY/0.8.1.4/dbproxy_notify.sh" 1.0.6
+  precheck_keepalived_script_tar
+  assert $? -eq 1
+  get_keepalived_script_tar_mock "$DBA_DELIVERY/0.8.1.4/dbproxy_notify.sh.nosuchfile" 1.0.7
+  precheck_keepalived_script_tar
+  assert $? -eq 1
+  get_keepalived_script_tar_mock "/dbproxy_notify.sh.nosuchfile" 1.0.7
+  precheck_keepalived_script_tar
+  assert $? -eq 1
+  get_keepalived_script_tar_mock "/var/log/messages" 1.0.7
+  precheck_keepalived_script_tar
+  assert $? -eq 0
+
+  cat >"$_tmp" <<'EOF'
+#!/bin/bash
+echo "dbproxy_notify 1.0.7"
+EOF
+  get_keepalived_script_tar_mock "$_tmp" ""
+  precheck_keepalived_script_tar
+  assert $? -eq 0
+  rm -f "$_tmp"
+
+  cat >"$_tmp" <<'EOF'
+#!/bin/bash
+echo "dbproxy_notify 1.0.6"
+EOF
+  get_keepalived_script_tar_mock "$_tmp" ""
+  precheck_keepalived_script_tar
+  assert $? -eq 1
+  rm -f "$_tmp"
+}
+test_check_keepalived_script()
+{
+  declare _tmp="/tmp/dbproxy_install_keepalived_script_src"
+  cat >"$_tmp" <<'EOF'
+#!/bin/bash
+echo "dbproxy_notify 1.0.7"
+EOF
+  chmod u+x "$_tmp"
+  get_keepalived_script_mock "$_tmp" ""
+  postcheck_keepalived_script
+  assert $? -eq 0
+  rm -f "$_tmp"
+
+  cat >"$_tmp" <<'EOF'
+#!/bin/bash
+echo "dbproxy_notify 1.0.6"
+EOF
+  chmod u+x "$_tmp"
+  get_keepalived_script_mock "$_tmp" ""
+  postcheck_keepalived_script
+  assert $? -eq 1
+  rm -f "$_tmp"
+}
+
+test_check_character_set()
+{
+  get_db_charset_mock "abc"
+  get_character_set_mock "abc"
+  check_character_set
+  assert $? -eq 0
+  get_character_set_mock "abcd"
+  check_character_set
+  assert $? -eq 1
+  get_db_charset_mock "abcd"
+  check_character_set
+  assert $? -eq 0
+}
+
+
+test_get_check_item_desc()
+{
+  declare _v=""
+  _v=$(get_check_item_desc "start")
+  assert $? -eq 0
+  assert "$_v" = "begin"
+  _v=$(get_check_item_desc "notfound")
+  assert $? -eq 1
+  assert "$_v" = "unknown"
+  _v=$(get_check_item_desc "config_os_privilege")
+  assert $? -eq 0
+  assert "$_v" = "Config OS Privilege"
+  _v=$(get_check_item_desc "finish")
+  assert $? -eq 0
+  assert "$_v" = "end"
+}
+
+
+test_find_exist_path()
+{
+  declare _v=""
+  _v=$(find_exist_path)
+  assert "$_v" = "/"
+  _v=$(find_exist_path "/")
+  assert "$_v" = "/"
+  _v=$(find_exist_path "/usr")
+  assert "$_v" = "/usr"
+  _v=$(find_exist_path "/usr/local")
+  assert "$_v" = "/usr/local"
+  _v=$(find_exist_path "/usr/local1111")
+  assert "$_v" = "/usr"
+  _v=$(find_exist_path "/usr/local/bin")
+  assert "$_v" = "/usr/local/bin"
+}
+
+
+_test_check_ssh()
+{
+  get_database_csv_mock "X.X.X.X:3306,X.X.X.X:3306"
+  database_csv_to_array
+  assert $? -eq 2
+  check_ssh
+  assert $? -eq 0
+}
+_test_check_database()
+{
+  get_database_csv_mock "X.X.X.X:3306"
+  database_csv_to_array
+  assert $? -eq 1
+  check_database
+  assert $? -eq 0
+}
+
+
+unittest()
+{
+  declare -i _cnt=0
+  declare -i _i=0
+  declare _func
+  _cnt=$(declare -F | sed 's/^declare -f //' | grep ^test_ | wc -l)
+  while read _func; do
+    ((_i++))
+    logger_info "[unittest ($_i)/($_cnt) - ${_func} ...]"
+    $_func
+  done < <(declare -F | sed 's/^declare -f //' | grep ^test_)
+  logger_info "unittest done. ($_i)/($_cnt)"
+}
+
+
+
+##### major functional modules
+
+usage()
+{
+  cat <<EOF
+Usage: $PROGNAME <verb> OPTIONS...
+
+verb:
+unittest      Unit test
+precheck      Check prerequisites
+fix           Fix prerequisites
+install       Install software
+write_config  Write config files. CAUTION: All config files will be overwritten.
+config        Config software
+postcheck     Post check
+help          This help
+
+OPTIONS:
+--force|-f             Ignore pre/post check result. (Y|N). Optional.
+--overwrite|-O         Overwrite config files. (Y|[N]). Optional.
+--mysql_home|--mh      MySQL HOME. /usr by default. Optional.
+--proxy_base|--pb      DBProxy Base Directory. /opt/sohu by default. Optional.
+--proxy_version|--pv   DBProxy Version.
+--database|--db        Backend Databases Addresses (MASTER_IP:PORT,SLAVE_IP:PORT,SLAVE...).
+--rw_address|--rw      Listening addresses for RW (IP:PORT,IP:PORT,...).
+--ro_address|--ro      Listening addresses for RO (IP:PORT,IP:PORT,...).
+--keepalived_placeholder|--kp Placeholder for keepalived instance. (IP). Optional.
+--character_set|--charset|--cs Character set. Use DB charset by default. Optional.
+
+EOF
+}
+
+
+csv_to_array()
+{
+  declare -r _pfx=$1
+  declare _ref_csv
+  declare _v_csv
+  declare _ref_array
+  declare _ref_ip_array
+  declare _ref_port_array
+  declare _array_name
+  declare _db
+  declare -i _i=0
+
+  if [ -z "$_pfx" ]; then
+    logger_error "VAR PREFIX not specified"
+    return 1
+  fi
+
+  _ref_csv=${_pfx}_CSV
+  _v_csv=${!_ref_csv}
+  _ref_array=${_pfx}_ARRAY
+  _ref_ip_array=${_pfx}_IP_ARRAY
+  _ref_port_array=${_pfx}_PORT_ARRAY
+
+  #logger_debug "_v_csv=$_v_csv"
+  eval "${_ref_array}=(${_v_csv//,/ })"
+  #logger_debug "_ref_array=${_ref_array[@]}"
+
+  unset ${_ref_ip_array}
+  unset ${_ref_port_array}
+  _array_name="${_ref_array}[@]"
+  for _db in "${!_array_name}"; do
+    #logger_debug "_db=$_db"
+    _ip_name="${_ref_ip_array}[$_i]"
+    _port_name="${_ref_port_array}[$_i]"
+    eval "${_ref_ip_array}[$_i]=${_db%:*}"
+    if [ "${!_ip_name}" != ${_db} ]; then
+      eval "${_ref_port_array}[$_i]=${_db##*:}"
+    fi
+    if [ -z "${!_port_name}" ]; then
+      eval "${_ref_port_array}[$_i]=3306"
+    fi
+    #logger_debug "_db_ip=${!_ip_name}"
+    #logger_debug "_db_port=${!_port_name}"
+    ((_i++))
+  done
+  return $_i
+}
+
+
+get_database_csv_mock()
+{
+  DATABASE_CSV=$1
+}
+database_csv_to_array()
+{
+  csv_to_array DATABASE
+  # DATABASE_ARRAY=(${DATABASE_CSV//,/ })
+  # declare _db
+  # declare -i _i=0
+  # unset DATABASE_IP_ARRAY
+  # unset DATABASE_PORT_ARRAY
+  # for _db in "${DATABASE_ARRAY[@]}"; do
+  #   logger_debug "_db=$_db"
+  #   DATABASE_IP_ARRAY[$_i]=${_db%:*}
+  #   if [ "${DATABASE_IP_ARRAY[$_i]}" != ${_db} ]; then
+  #     DATABASE_PORT_ARRAY[$_i]=${_db##*:}
+  #   fi
+  #   if [ -z "${DATABASE_PORT_ARRAY[$_i]}" ]; then
+  #     DATABASE_PORT_ARRAY[$_i]=3306
+  #   fi
+  #   logger_debug "_db_ip=${DATABASE_IP_ARRAY[$_i]}"
+  #   logger_debug "_db_port=${DATABASE_PORT_ARRAY[$_i]}"
+  #   ((_i++))
+  # done
+  # return $_i
+}
+
+get_rw_address_csv_mock()
+{
+  RW_ADDRESS_CSV=$1
+}
+rw_address_csv_to_array()
+{
+  csv_to_array RW_ADDRESS
+}
+
+get_ro_address_csv_mock()
+{
+  RO_ADDRESS_CSV=$1
+}
+ro_address_csv_to_array()
+{
+  csv_to_array RO_ADDRESS
+}
+
+sanity_check()
+{
+  PROXY_BASE=${PROXY_BASE:-/opt/sohu}
+  if [ -z "$PROXY_VERSION" ]; then
+    logger_error "PROXY_VERSION not specified"
+    return 1
+  fi
+  if [ -z "$PROXY_VERSION_MAJOR" ]; then
+    PROXY_VERSION_MAJOR=$(echo "$PROXY_VERSION" | cut -d. -f1-3)
+  fi
+
+  database_csv_to_array
+
+  if [ -z "$RW_ADDRESS_CSV" ]; then
+    logger_error "RW_ADDRESS not specified"
+    return 1
+  fi
+  if [ -z "$RO_ADDRESS_CSV" ]; then
+    logger_error "RO_ADDRESS not specified"
+    return 1
+  fi
+  rw_address_csv_to_array
+  ro_address_csv_to_array
+
+  # if [ -z "$CHARACTER_SET" ]; then
+  #   logger_error "CHARACTER_SET not specified"
+  #   return 1
+  # fi
+
+  PROXY_USER=${PROXY_USER:-test}
+  PROXY_PWD=${PROXY_PWD:-test}
+
+  PINGMYSQL_USER=${PINGMYSQL_USER:-pingmysql}
+  PINGMYSQL_PWD=${PINGMYSQL_PWD:-'5!Mon0em?'}
+
+  SSH="ssh -q -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+
+  KEEPALIVED=/usr/sbin/keepalived
+  KEEPALIVED_PATH=/etc/keepalived
+}
+
+
+### main entrance
+declare -r PROGNAME=setup
+declare -r TIMESTAMP=$(date '+%Y%m%d%H%M%S')
+DBA_DELIVERY=http://X.X.X.X/pub/software/unix/dba-delivery/dbproxy
+MYSQL_HOME=${MYSQL_HOME:-/usr}
+
+verb=$1
+shift
+
+SHORT_OPTS="hfOV"
+LONG_OPTS="
+help
+force
+overwrite
+log_level: ll:
+version
+
+proxy_base: pb:
+database: db:
+rw_address: rw:
+ro_address: ro:
+keepalived_placeholder: kp:
+
+mysql_home: mh:
+proxy_version: pv:
+character_set: charset: cs:
+"
+if [ $# -gt 0 ]; then
+  ARGS=$(getopt -n$PROGNAME -o "$SHORT_OPTS" -l "$LONG_OPTS" -- "$@") || \
+  { echo "getopt error"; usage; exit 1; }
+  eval set -- "$ARGS"
+fi
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --help|-h) usage; exit ;;
+    --force|-f) FORCE=Y ;;
+    --overwrite|-O) OVERWRITE=Y ;;
+    --log_level|--ll)
+      LOG_LEVEL=$(logger_log_level_num "$2")
+      shift
+      ;;
+    --version|-V)
+      echo "$VERSION"
+      exit 0
+      ;;
+
+    --mysql_home|--mh)
+      MYSQL_HOME=$2
+      shift
+      ;;
+    --proxy_base|--pb)
+      PROXY_BASE=$2
+      shift
+      ;;
+    --proxy_version|--pv)
+      PROXY_VERSION=$2
+      shift
+      ;;
+    --database|--db)
+      DATABASE_CSV=$2
+      shift
+      ;;
+    --character_set|--charset|--cs)
+      CHARACTER_SET=$2
+      shift
+      ;;
+    --rw_address|--rw)
+      RW_ADDRESS_CSV=$2
+      shift
+      ;;
+    --ro_address|--ro)
+      RO_ADDRESS_CSV=$2
+      shift
+      ;;
+    --keepalived_placeholder|--kp)
+      KEEPALIVED_PLACEHOLDER=$2
+      shift
+      ;;
+    --) shift
+      declare e
+      for e; do
+        eval_param "$e"
+      done
+      break ;;
+    #bad options
+    -*) echo "bad1"; usage; exit 1 ;;
+    *) echo "bad2"; usage; exit 1 ;;
+  esac
+  shift
+done
+LOG_LEVEL=${LOG_LEVEL:-$(logger_log_level_num INFO)}
+case "$verb" in
+  unittest|help)
+    :
+    ;;
+  *)
+    sanity_check "$verb" || { usage; exit 1; }
+    ;;
+esac
+
+declare -i rc=0
+case "$verb" in
+  unittest) unittest ;;
+
+  precheck) precheck check ;;
+  prefix) precheck fix ;;
+  install) install ;;
+
+  config) config ;;
+  write_config) write_config ;;
+
+  postcheck) postcheck check ;;
+  postfix) postcheck fix ;;
+
+  all) all ;;
+
+  help) usage ;;
+  *) logger_error "unknown verb: $verb"; exit 1 ;;
+esac
+rc=$?
+if ((rc!=0)); then
+  logger_error "$verb error."
+fi
+exit $rc
+
+# this is comment
+: <<'EOF'
+bash setup unittest
+
+PROXY_SETUP_OPTS="--pv=0.8.1.4 --db=X.X.X.X:3306,X.X.X.X:3306 --rw=1.2.3.4:9000 --ro=1.2.3.5:9000"
+PROXY_SETUP_OPTS="--pv=0.8.1.5 --db=X.X.X.X:3306,X.X.X.X:3306,X.X.X.X:3306 --rw=X.X.X.X:3456 --ro=X.X.X.X:3457"
+bash setup all $PROXY_SETUP_OPTS
+
+bash setup precheck $PROXY_SETUP_OPTS
+bash setup install $PROXY_SETUP_OPTS
+bash setup write_config $PROXY_SETUP_OPTS
+bash setup config $PROXY_SETUP_OPTS
+bash setup postcheck $PROXY_SETUP_OPTS
+
+EOF
+
+#eof
