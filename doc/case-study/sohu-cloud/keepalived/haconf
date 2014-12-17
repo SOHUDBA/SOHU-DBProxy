@@ -1,0 +1,1 @@
+N dbproxy /usr 3001 null [MASTER_IP],[SLAVE_IP] N vi_dbproxy_[VIID] null null
