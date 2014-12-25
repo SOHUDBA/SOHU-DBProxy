@@ -39,8 +39,19 @@
 * dbproxy: 负载均衡、从库切换。提供操作主库切换的接口（针对于手工切换方案）；或主动进行主库的切换（对于自动切换方案）
 * mysql: 一主一从复制 半同步
 
+#如何安装
+1 在2台主机配置好mysql主从复杂（半同步）
 
+2 在2台主机配置好dbproxy
 
+3 在2台主机配置好keepalived,配置和脚本均在/etc/keepalived目录下
+
+   * /etc/keepalived配置包括keepalived.conf和haconf(通过haconf可以定义维护模式等)
+   * /etc/keepalived也包括keepalived目录下的脚本
+ 
+# 实现及上线情况
+
+采用高可用方案二，已经在 sohu的线上系统部署使用
 
 
 # 方案一 手工切换
@@ -328,10 +339,26 @@
         * 修改权重
 
 
+#配置说明
+##haconf文件说明
+1.格式说明
+ 
+* 第一列：N或者Y, Y表示维护模式。维护模式就是跳过keepalived的检查和提升逻辑，这样你可以手工控制一切操作
+* 第二列：dbproxy。 表示是dbproxy类型 
+* 第三列：mysql的目录
+* 第四列：保留
+* 第五列：MASTER_IP
+* 第六列：SLAVE_IP
+* 第七列：N或者Y, Y表示错误模式。错误模式下服务会切换到另外一台机器上，功能类似于停止本地的keepalived
+* 第八列：和keepalived.conf的vrrp_instance的名字需要一致
+* 第九列：保留
+* 第十列：保留
+
+2.举例
+
+N dbproxy /usr 3001 null 192.168.1.1,192.168.1.2 N vi_dbproxy_73 null null
 
 
 
-# 实现及上线情况
 
-高可用方案二，已经在 sce 数据库公有云平台上线部署
 
