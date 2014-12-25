@@ -17,11 +17,14 @@ SOHU-DBProxy是由 搜狐 数据库团队开发维护的一个基于MySQL协议�
 
 6 读写分离（当前版本没有，代码和测试已经完成，没有合并到当前版本）
 
+###二、最近更新
 
+* 2013/12/25 [更新了文档](doc//case-study/sohu-cloud/dbha.md)，描述一个线上如何使用dbproxy的案例，通过(keepalived+dbproyx+mysql主从) 构架来提供无单点的mysqld服务，
+ 
 
-###二、dbproxy详细说明
+###三、dbproxy详细说明
 
-[1.二进制安装的包(支持redhat5/6)] (bin/)  
+[1.二进制安装的包:支持redhat5/6](bin/)  
 
 [2.快速了解dbproxy](doc/Getting_Started_with_DBProxy.pdf)
 
@@ -35,7 +38,9 @@ SOHU-DBProxy是由 搜狐 数据库团队开发维护的一个基于MySQL协议�
 
 [7.dbproxy的内部设计文档](doc/design_internal_doc)
 
-###三、dbproxy的需求及Bug反馈方式
+[8.一个线上如何使用dbproxy的案例，通过(keepalived+dbproyx+mysql主从) 构架来提供无单点的mysqld服务](doc//case-study/sohu-cloud/dbha.md)
+
+###四、dbproxy的需求及Bug反馈方式
 
 如果用户在实际的应用场景中有新的功能需求，或者在使用的过程中发现了bug，
 欢迎用户发邮件至dba@sohu-inc.com，或者通过qq群164449733,与我们取得联系，我们将及时回复。
