@@ -48,7 +48,7 @@
 
    * /etc/keepalived配置包括keepalived.conf和haconf(通过haconf可以定义维护模式等)
    * /etc/keepalived也包括keepalived目录下的脚本
- 
+
 # 实现及上线情况
 
 采用高可用方案二，已经在 sohu的线上系统部署使用
@@ -205,7 +205,7 @@
 
 
 2. 从库切换: down 或延迟
-    * dbproxy将对应的节点从读负载均衡的列表中摘除（可以通过设置权重或者设置 dbproxy 的状态的方式进行），读请求切道主库
+    * dbproxy将对应的节点从读负载均衡的列表中摘除（可以通过设置权重或者设置 dbproxy 的状态的方式进行），读请求切到主库
 
 
 3. 主库切换: down
@@ -235,19 +235,19 @@
 
     脚本实现时，包括三个动作
     > to_master: notify_master "/etc/keepalived/dbproxy_notify.sh --state=master --vip=192.168.1.2 --gw=192.168.1.200"
-    > 
+    >
     > 确认虚ip可用，启动并确认dbproxy正常运行
-    > 
-    > 
+    >
+    >
     > to_slave : notify_backup "/etc/keepalived/dbproxy_notify.sh --state=backup --vip=192.168.1.2 --gw=192.168.1.200"
-    > 
+    >
     > 不做任何动作
-    > 
-    > 
+    >
+    >
     > to_fault : notify_fault "/etc/keepalived/dbproxy_notify.sh --state=fault --vip=192.168.1.2 --gw=192.168.1.200"
-    > 
+    >
     > stop dbproxy, 并确认删除虚ip
-    > 
+    >
 
 
 2. rw backend高可用
@@ -259,11 +259,11 @@
         * 降级（dbproxy 里面会做一部分将 rw 节点设置为 down）
         * 选主（脚本中选取另外一个 up 的 slave 为主库）
         * 提升，具体过程如下
-        
+
             > 等待新主库日志应用；
-            > 
+            >
             > 将新主库的 readonly 关闭；
-            > 
+            >
             > 设置其写权重为 非0；（便于后续 dbproxy 选主）
     * 根据主从设置 read_only 定时
     * (keepalived)
@@ -284,7 +284,7 @@
 
 
 2. dbproxy down
-    * dbproxy 高可用 切换 
+    * dbproxy 高可用 切换
     * 同 1.
 
 
@@ -342,9 +342,9 @@
 #配置说明
 ##haconf文件说明
 1.格式说明
- 
+
 * 第一列：N或者Y, Y表示维护模式。维护模式就是跳过keepalived的检查和提升逻辑，这样你可以手工控制一切操作
-* 第二列：dbproxy。 表示是dbproxy类型 
+* 第二列：dbproxy。 表示是dbproxy类型
 * 第三列：mysql的目录
 * 第四列：保留
 * 第五列：MASTER_IP
@@ -357,8 +357,3 @@
 2.举例
 
 N dbproxy /usr 3001 null 192.168.1.1,192.168.1.2 N vi_dbproxy_73 null null
-
-
-
-
-
